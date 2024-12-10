@@ -1,9 +1,8 @@
 import os
 import torch
 import json
-from typing import List
 import gc
-from .utils import log, check_diffusers_version, print_memory
+from .utils import log, print_memory
 from diffusers.video_processor import VideoProcessor
 
 from .hyvideo.constants import PROMPT_TEMPLATE
@@ -20,6 +19,8 @@ from accelerate.utils import set_module_tensor_to_device
 import folder_paths
 import comfy.model_management as mm
 from comfy.utils import load_torch_file
+import comfy.model_base
+import comfy.latent_formats
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -56,7 +57,7 @@ def get_rotary_pos_embed(transformer, video_length, height, width):
 
         if len(rope_sizes) != target_ndim:
             rope_sizes = [1] * (target_ndim - len(rope_sizes)) + rope_sizes  # time axis
-        
+
         if rope_dim_list is None:
             rope_dim_list = [head_dim // target_ndim for _ in range(target_ndim)]
         assert (
@@ -75,7 +76,7 @@ class HyVideoBlockSwap:
     @classmethod
     def INPUT_TYPES(s):
         return {
-            "required": { 
+            "required": {
                 "double_blocks_to_swap": ("INT", {"default": 20, "min": 0, "max": 20, "step": 1, "tooltip": "Number of double blocks to swap"}),
                 "single_blocks_to_swap": ("INT", {"default": 0, "min": 0, "max": 40, "step": 1, "tooltip": "Number of single blocks to swap"}),
                 "offload_txt_in": ("BOOLEAN", {"default": False, "tooltip": "Offload txt_in layer"}),
@@ -95,7 +96,7 @@ class HyVideoSTG:
     @classmethod
     def INPUT_TYPES(s):
         return {
-            "required": { 
+            "required": {
                 "stg_mode": (["STG-A", "STG-R"],),
                 "stg_block_idx": ("INT", {"default": 0, "min": -1, "max": 39, "step": 1, "tooltip": "Block index to apply STG"}),
                 "stg_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "Recommended values are ≤2.0"}),
@@ -112,6 +113,33 @@ class HyVideoSTG:
     def setargs(self, **kwargs):
         return (kwargs, )
 
+
+class HyVideoModel(comfy.model_base.BaseModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pipeline = {}
+
+    def __getitem__(self, k):
+        return self.pipeline[k]
+
+    def __setitem__(self, k, v):
+        self.pipeline[k] = v
+
+
+class HyVideoModelConfig:
+    def __init__(self, dtype):
+        self.unet_config = {}
+        self.unet_extra_config = {}
+        self.latent_format = comfy.latent_formats.LatentFormat()
+        self.latent_format.latent_channels = 16
+        self.manual_cast_dtype = dtype
+        self.sampling_settings = {"multiplier": 1.0}
+        # Don't know what this is. Value taken from ComfyUI Mochi model.
+        self.memory_usage_factor = 2.0
+        # denoiser is handled by extension
+        self.unet_config["disable_unet_model_creation"] = True
+
+
 #region Model loading
 class HyVideoModelLoader:
     @classmethod
@@ -119,7 +147,7 @@ class HyVideoModelLoader:
         return {
             "required": {
                 "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
-            
+
             "base_precision": (["fp16", "fp32", "bf16"], {"default": "bf16"}),
             "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
             "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
@@ -136,7 +164,7 @@ class HyVideoModelLoader:
             }
         }
 
-    RETURN_TYPES = ("HYVIDEOMODEL",)
+    RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("model", )
     FUNCTION = "loadmodel"
     CATEGORY = "HunyuanVideoWrapper"
@@ -202,7 +230,7 @@ class HyVideoModelLoader:
             #     if any(sub in fqn for sub in target_submodules):
             #         return isinstance(module, nn.Linear)
             #     return False
-            
+
             if "fp6" in quantization:
                 quant_func = fpx_weight_only(3, 2)
             elif "int4" in quantization:
@@ -240,7 +268,7 @@ class HyVideoModelLoader:
             for name, param in transformer.named_parameters():
                 if "single_blocks" not in name and "double_blocks" not in name:
                     set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=base_dtype, value=sd[name])
-            
+
             manual_offloading = False # to disable manual .to(device) calls
             log.info(f"Quantized transformer blocks to {quantization}")
             for name, param in transformer.named_parameters():
@@ -256,12 +284,12 @@ class HyVideoModelLoader:
             for name, param in transformer.named_parameters():
                 dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
                 set_module_tensor_to_device(transformer, name, device=transformer_load_device, dtype=dtype_to_use, value=sd[name])
-            
+
 
             if quantization == "fp8_e4m3fn_fast":
                 from .fp8_optimization import convert_fp8_linear
                 convert_fp8_linear(transformer, base_dtype, params_to_keep=params_to_keep)
-            
+
             #compile
             if compile_args is not None:
                 torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
@@ -286,25 +314,32 @@ class HyVideoModelLoader:
             reverse=True,
             solver="euler",
         )
-        
+
         pipe = HunyuanVideoPipeline(
             transformer=transformer,
             scheduler=scheduler,
             progress_bar_config=None,
             base_dtype=base_dtype
         )
-        
-        pipeline = {
-            "pipe": pipe,
-            "dtype": base_dtype,
-            "base_path": model_path,
-            "model_name": model,
-            "manual_offloading": manual_offloading,
-            "quantization": "disabled",
-            "block_swap_args": block_swap_args,
-        }
-        return (pipeline,)
-    
+
+        comfy_model = HyVideoModel(
+            HyVideoModelConfig(base_dtype),
+            model_type=comfy.model_base.ModelType.FLOW,
+            device=mm.get_torch_device(),
+        )
+        comfy_model["pipe"] = pipe
+        comfy_model["dtype"] = base_dtype
+        comfy_model["base_path"] = model_path
+        comfy_model["model_name"] = model
+        comfy_model["manual_offloading"] = manual_offloading
+        comfy_model["quantization"] = "disabled"
+        comfy_model["block_swap_args"] = block_swap_args
+        comfy_model.diffusion_model = transformer
+
+        patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
+
+        return (patcher,)
+
 #region load VAE
 
 class HyVideoVAELoader:
@@ -329,7 +364,7 @@ class HyVideoVAELoader:
     DESCRIPTION = "Loads Hunyuan VAE model from 'ComfyUI/models/vae'"
 
     def loadmodel(self, model_name, precision, compile_args=None):
-        
+
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
@@ -345,21 +380,21 @@ class HyVideoVAELoader:
         vae.requires_grad_(False)
         vae.eval()
         vae.to(device = device, dtype = dtype)
-        
+
         #compile
         if compile_args is not None:
             torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
             vae = torch.compile(vae, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
 
         return (vae,)
-    
 
-    
+
+
 class HyVideoTorchCompileSettings:
     @classmethod
     def INPUT_TYPES(s):
         return {
-            "required": { 
+            "required": {
                 "backend": (["inductor","cudagraphs"], {"default": "inductor"}),
                 "fullgraph": ("BOOLEAN", {"default": False, "tooltip": "Enable full graph mode"}),
                 "mode": (["default", "max-autotune", "max-autotune-no-cudagraphs", "reduce-overhead"], {"default": "default"}),
@@ -395,7 +430,7 @@ class HyVideoTorchCompileSettings:
         }
 
         return (compile_args, )
-    
+
 #region TextEncode
 
 class DownloadAndLoadHyVideoTextEncoder:
@@ -405,7 +440,7 @@ class DownloadAndLoadHyVideoTextEncoder:
             "required": {
                 "llm_model": (["Kijai/llava-llama-3-8b-text-encoder-tokenizer",],),
                 "clip_model": (["disabled","openai/clip-vit-large-patch14",],),
-                
+
                  "precision": (["fp16", "fp32", "bf16"],
                     {"default": "bf16"}
                 ),
@@ -424,7 +459,7 @@ class DownloadAndLoadHyVideoTextEncoder:
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
     def loadmodel(self, llm_model, clip_model, precision, apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
-        
+
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
@@ -473,7 +508,7 @@ class DownloadAndLoadHyVideoTextEncoder:
                 local_dir=base_path,
                 local_dir_use_symlinks=False,
             )
-       
+
         text_encoder = TextEncoder(
             text_encoder_path=base_path,
             text_encoder_type="llm",
@@ -487,13 +522,13 @@ class DownloadAndLoadHyVideoTextEncoder:
             dtype=dtype,
             quantization_config=quantization_config
         )
-       
-        
+
+
         hyvid_text_encoders = {
             "text_encoder": text_encoder,
             "text_encoder_2": text_encoder_2,
         }
-       
+
         return (hyvid_text_encoders,)
 
 class HyVideoCustomPromptTemplate:
@@ -516,7 +551,7 @@ class HyVideoCustomPromptTemplate:
             "crop_start": crop_start,
         }
         return (prompt_template_dict,)
-        
+
 class HyVideoTextEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -549,7 +584,7 @@ class HyVideoTextEncode:
             text_encoder_2 = None
 
         negative_prompt = None
-        
+
         if prompt_template != "disabled":
             if prompt_template == "custom":
                 prompt_template_dict = custom_prompt_template
@@ -574,12 +609,12 @@ class HyVideoTextEncode:
             batch_size = 1
             num_videos_per_prompt = 1
             do_classifier_free_guidance = False # not implemented, for now we only have cfg distilled model
-            
+
             text_inputs = text_encoder.text2tokens(prompt, prompt_template=prompt_template_dict)
 
             prompt_outputs = text_encoder.encode(text_inputs, prompt_template=prompt_template_dict, device=device)
             prompt_embeds = prompt_outputs.hidden_state
-            
+
             attention_mask = prompt_outputs.attention_mask
             log.info(f"{text_encoder.text_encoder_type} prompt attention_mask shape: {attention_mask.shape}, masked tokens: {attention_mask[0].sum().item()}")
             if attention_mask is not None:
@@ -696,7 +731,7 @@ class HyVideoTextEncode:
             prompt_embeds_2 = prompt_embeds_2.to(device=device)
 
             negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = None, None, None
-          
+
             if force_offload:
                 clip_l.cond_stage_model.to(offload_device)
                 mm.soft_empty_cache()
@@ -705,7 +740,7 @@ class HyVideoTextEncode:
             negative_prompt_embeds_2 = None
             attention_mask_2 = None
             negative_attention_mask_2 = None
-        
+
         prompt_embeds_dict = {
                 "prompt_embeds": prompt_embeds,
                 "negative_prompt_embeds": negative_prompt_embeds,
@@ -717,15 +752,15 @@ class HyVideoTextEncode:
                 "negative_attention_mask_2": negative_attention_mask_2,
             }
         return (prompt_embeds_dict,)
-   
 
-#region Sampler    
+
+#region Sampler
 class HyVideoSampler:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": ("HYVIDEOMODEL",),
+                "model": ("MODEL",),
                 "hyvid_embeds": ("HYVIDEMBEDS", ),
                 "width": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 16}),
                 "height": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 16}),
@@ -735,7 +770,7 @@ class HyVideoSampler:
                 "flow_shift": ("FLOAT", {"default": 9.0, "min": 0.0, "max": 30.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "force_offload": ("BOOLEAN", {"default": True}),
-                
+
             },
             "optional": {
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
@@ -750,6 +785,10 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, samples=None, denoise_strength=1.0, force_offload=True, stg_args=None):
+        # We only need this so that LoRA weights get patched.
+        comfy.model_management.load_models_gpu([model])
+        model = model.model
+
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         dtype = model["dtype"]
@@ -760,7 +799,7 @@ class HyVideoSampler:
                 raise ValueError(
                     f"STG-A requires attention_mode to be 'sdpa', but got {transformer.attention_mode}."
             )
-        
+
         generator = torch.Generator(device=torch.device("cpu")).manual_seed(seed)
 
         if width <= 0 or height <= 0 or num_frames <= 0:
@@ -785,7 +824,7 @@ class HyVideoSampler:
         n_tokens = freqs_cos.shape[0]
 
         model["pipe"].scheduler.shift = flow_shift
-  
+
         # autocast_context = torch.autocast(
         #     mm.get_autocast_device(device), dtype=dtype
         # ) if any(q in model["quantization"] for q in ("e4m3fn", "GGUF")) else nullcontext()
@@ -795,9 +834,9 @@ class HyVideoSampler:
                 #print(name, param.data.device)
                 if "single" not in name and "double" not in name:
                     param.data = param.data.to(device)
-                
+
             transformer.block_swap(
-                model["block_swap_args"]["double_blocks_to_swap"] - 1 , 
+                model["block_swap_args"]["double_blocks_to_swap"] - 1 ,
                 model["block_swap_args"]["single_blocks_to_swap"] - 1,
                 offload_txt_in = model["block_swap_args"]["offload_txt_in"],
                 offload_img_in = model["block_swap_args"]["offload_img_in"],
@@ -808,18 +847,17 @@ class HyVideoSampler:
         elif model["manual_offloading"]:
             transformer.to(device)
 
-        mm.unload_all_models()
         mm.soft_empty_cache()
         gc.collect()
-        
+
         try:
             torch.cuda.reset_peak_memory_stats(device)
         except:
             pass
-                
+
         #for name, param in transformer.named_parameters():
         #    print(name, param.data.device)
-        
+
         out_latents = model["pipe"](
             num_inference_steps=steps,
             height = target_height,
@@ -845,7 +883,7 @@ class HyVideoSampler:
             torch.cuda.reset_peak_memory_stats(device)
         except:
             pass
-        
+
         if force_offload:
             if model["manual_offloading"]:
                 transformer.to(offload_device)
@@ -856,8 +894,8 @@ class HyVideoSampler:
             "samples": out_latents
             },)
 
-    
-#region VideoDecode    
+
+#region VideoDecode
 class HyVideoDecode:
     @classmethod
     def INPUT_TYPES(s):
@@ -868,7 +906,7 @@ class HyVideoDecode:
                     "temporal_tiling_sample_size": ("INT", {"default": 16, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64, any other value will cause stutter"}),
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
-                    },            
+                    },
                 }
 
     RETURN_TYPES = ("IMAGE",)
@@ -896,8 +934,8 @@ class HyVideoDecode:
             vae.tile_latent_min_tsize = 16
             vae.tile_sample_min_size = 256
             vae.tile_latent_min_size = 32
-        
-        
+
+
         expand_temporal_dim = False
         if len(latents.shape) == 4:
             if isinstance(vae, AutoencoderKLCausal3D):
@@ -941,7 +979,7 @@ class HyVideoDecode:
 
         return (out,)
 
-#region VideoEncode    
+#region VideoEncode
 class HyVideoEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -952,7 +990,7 @@ class HyVideoEncode:
                     "temporal_tiling_sample_size": ("INT", {"default": 16, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64, any other value will cause stutter"}),
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
-                    },            
+                    },
                 }
 
     RETURN_TYPES = ("LATENT",)
@@ -963,7 +1001,7 @@ class HyVideoEncode:
     def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
-        
+
         generator = torch.Generator(device=torch.device("cpu"))#.manual_seed(seed)
         vae.to(device)
         if not auto_tile_size:
@@ -986,8 +1024,8 @@ class HyVideoEncode:
         latents = vae.encode(image).latent_dist.sample(generator)
         latents = latents * vae.config.scaling_factor
         vae.to(offload_device)
-        print("encoded latents shape",latents.shape)      
-        
+        print("encoded latents shape",latents.shape)
+
 
         return ({"samples": latents},)
 
@@ -1017,7 +1055,7 @@ class CogVideoLatentPreview:
         latents = samples["samples"].clone()
         print("in sample", latents.shape)
         latents = latents.permute(0, 2, 1, 3, 4)  # [batch_size, num_channels, num_frames, height, width]
- 
+
         #[[0.0658900170023352, 0.04687556512203313, -0.056971557475649186], [-0.01265770449940036, -0.02814809569100843, -0.0768912512529372], [0.061456544746314665, 0.0005511617552452358, -0.0652574975291287], [-0.09020669168815276, -0.004755440180558637, -0.023763970904494294], [0.031766964513999865, -0.030959599938418375, 0.08654669098083616], [-0.005981764690055846, -0.08809119252349802, -0.06439852368217663], [-0.0212114426433989, 0.08894281999597677, 0.05155629477559985], [-0.013947446911030725, -0.08987475069900677, -0.08923124751217484], [-0.08235967967978511, 0.07268025379974379, 0.08830486164536037], [-0.08052049179735378, -0.050116143175332195, 0.02023752569687405], [-0.07607527759162447, 0.06827156419895981, 0.08678111754261035], [-0.04689089232553825, 0.017294986041038893, -0.10280492336438908], [-0.06105783150270304, 0.07311850680875913, 0.019995735372550075], [-0.09232589996527711, -0.012869815059053047, -0.04355587834255975], [-0.06679931010802251, 0.018399815879067458, 0.06802404982033876], [-0.013062632927118165, -0.04292991477896661, 0.07476243356192845]]
         latent_rgb_factors =[[0.11945946736445662, 0.09919175788574555, -0.004832707433877734], [-0.0011977028264356232, 0.05496505130267682, 0.021321622433638193], [-0.014088548986590666, -0.008701477861945644, -0.020991313281459367], [0.03063921972519621, 0.12186477097625073, 0.0139593690235148], [0.0927403067854673, 0.030293187650929136, 0.05083134241694003], [0.0379112441305742, 0.04935199882777209, 0.058562766246777774], [0.017749911959153715, 0.008839453404921545, 0.036005638019226294], [0.10610119248526109, 0.02339855688237826, 0.057154257614084596], [0.1273639464837117, -0.010959856130713416, 0.043268631260428896], [-0.01873510946881321, 0.08220930648486932, 0.10613256772247093], [0.008429116376722327, 0.07623856561000408, 0.09295712117576727], [0.12938137079617007, 0.12360403483892413, 0.04478930933220116], [0.04565908794779364, 0.041064156741596365, -0.017695041535528512], [0.00019003240570281826, -0.013965147883381978, 0.05329669529635849], [0.08082391586738358, 0.11548306825496074, -0.021464170006615893], [-0.01517932393230994, -0.0057985555313003236, 0.07216646476618871]]
         import random
@@ -1025,10 +1063,10 @@ class CogVideoLatentPreview:
         latent_rgb_factors = [[random.uniform(min_val, max_val) for _ in range(3)] for _ in range(16)]
         out_factors = latent_rgb_factors
         print(latent_rgb_factors)
-       
+
         latent_rgb_factors_bias = [0.085, 0.137, 0.158]
         #latent_rgb_factors_bias = [r_bias, g_bias, b_bias]
-        
+
         latent_rgb_factors = torch.tensor(latent_rgb_factors, device=latents.device, dtype=latents.dtype).transpose(0, 1)
         latent_rgb_factors_bias = torch.tensor(latent_rgb_factors_bias, device=latents.device, dtype=latents.dtype)
 
@@ -1049,9 +1087,9 @@ class CogVideoLatentPreview:
         latent_images_min = latent_images.min()
         latent_images_max = latent_images.max()
         latent_images = (latent_images - latent_images_min) / (latent_images_max - latent_images_min)
-        
+
         return (latent_images.float().cpu(), out_factors)
-    
+
 NODE_CLASS_MAPPINGS = {
     "HyVideoSampler": HyVideoSampler,
     "HyVideoDecode": HyVideoDecode,
