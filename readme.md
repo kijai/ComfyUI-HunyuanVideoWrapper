@@ -1,5 +1,15 @@
 # ComfyUI wrapper nodes for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo)
 
+# Multi GPU Setup - For systems with more then 1 cuda device.
+The max I was able to get on a 4080 and 4090 distributed setup with no unloading..
+
+![image](https://github.com/user-attachments/assets/0752b3d2-7559-40c8-8345-314582602496)
+
+![image](https://github.com/user-attachments/assets/8dd16b7f-ce39-4ad2-9932-e911986e31c4)
+
+https://github.com/user-attachments/assets/4a2e78b9-5b41-41c1-a460-3c3ce945aa61
+
+
 
 # Experimental IP2V - Image Prompting to Video via VLM by @Dango233
 ## WORK IN PROGRESS - But it should work now!
