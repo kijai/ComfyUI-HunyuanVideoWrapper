@@ -855,7 +855,7 @@ class HyVideoTextImageEncode(HyVideoTextEncode):
         return {"required": {
             "text_encoders": ("HYVIDTEXTENCODER",),
             "prompt": ("STRING", {"default": "", "multiline": True} ),
-            "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
+            "device": ([f"cuda:{i}" for i in range(torch.cuda.device_count())],),
             "image_token_selection_expr": ("STRING", {"default": "::4", "multiline": False} ),
             },
             "optional": {
