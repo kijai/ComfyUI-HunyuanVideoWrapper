@@ -1,6 +1,6 @@
 # ComfyUI wrapper nodes for [HunyuanVideo](https://github.com/Tencent/HunyuanVideo)
 
-# Multi GPU Setup - For systems with more then 1 cude device.
+# Multi GPU Setup - For systems with more then 1 cuda device.
 The max I was able to get on a 4080 and 4090 distributed setup with no unloading..
 
 ![image](https://github.com/user-attachments/assets/0752b3d2-7559-40c8-8345-314582602496)
