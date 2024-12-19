@@ -855,6 +855,7 @@ class HyVideoTextImageEncode(HyVideoTextEncode):
         return {"required": {
             "text_encoders": ("HYVIDTEXTENCODER",),
             "prompt": ("STRING", {"default": "", "multiline": True} ),
+            "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
             "image_token_selection_expr": ("STRING", {"default": "::4", "multiline": False} ),
             },
             "optional": {
