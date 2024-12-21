@@ -430,6 +430,7 @@ class HyVideoVAELoader:
         return {
             "required": {
                 "model_name": (folder_paths.get_filename_list("vae"), {"tooltip": "These models are loaded from 'ComfyUI/models/vae'"}),
+                "device": ([f"cuda:{i}" for i in range(torch.cuda.device_count())],),
             },
             "optional": {
                 "precision": (["fp16", "fp32", "bf16"],
@@ -445,9 +446,8 @@ class HyVideoVAELoader:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan VAE model from 'ComfyUI/models/vae'"
 
-    def loadmodel(self, model_name, precision, compile_args=None):
+    def loadmodel(self, model_name, device, precision, compile_args=None):
 
-        device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
@@ -521,6 +521,7 @@ class DownloadAndLoadHyVideoTextEncoder:
         return {
             "required": {
                 "llm_model": (["Kijai/llava-llama-3-8b-text-encoder-tokenizer","xtuner/llava-llama-3-8b-v1_1-transformers"],),
+                "device": ([f"cuda:{i}" for i in range(torch.cuda.device_count())],),
                 "clip_model": (["disabled","openai/clip-vit-large-patch14",],),
                  "precision": (["fp16", "fp32", "bf16"],
                     {"default": "bf16"}
@@ -539,13 +540,12 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
+    def loadmodel(self, llm_model, device, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
         lm_type_mapping = {
             "Kijai/llava-llama-3-8b-text-encoder-tokenizer": "llm",
             "xtuner/llava-llama-3-8b-v1_1-transformers": "vlm",
         }
         lm_type = lm_type_mapping[llm_model]
-        device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         quantization_config = None
@@ -660,6 +660,7 @@ class HyVideoTextEncode:
         return {"required": {
             "text_encoders": ("HYVIDTEXTENCODER",),
             "prompt": ("STRING", {"default": "", "multiline": True} ),
+            "device": ([f"cuda:{i}" for i in range(torch.cuda.device_count())],),
             },
             "optional": {
                 "force_offload": ("BOOLEAN", {"default": True}),
@@ -675,10 +676,9 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
+    def process(self, text_encoders, device, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
-        device = mm.text_encoder_device()
         offload_device = mm.text_encoder_offload_device()
 
         text_encoder_1 = text_encoders["text_encoder"]
@@ -855,6 +855,7 @@ class HyVideoTextImageEncode(HyVideoTextEncode):
         return {"required": {
             "text_encoders": ("HYVIDTEXTENCODER",),
             "prompt": ("STRING", {"default": "", "multiline": True} ),
+            "device": ([f"cuda:{i}" for i in range(torch.cuda.device_count())],),
             "image_token_selection_expr": ("STRING", {"default": "::4", "multiline": False} ),
             },
             "optional": {
@@ -1023,6 +1024,7 @@ class HyVideoSampler:
                 "flow_shift": ("FLOAT", {"default": 9.0, "min": 0.0, "max": 30.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "force_offload": ("BOOLEAN", {"default": True}),
+                "device": ([f"cuda:{i}" for i in range(torch.cuda.device_count())],),
 
             },
             "optional": {
@@ -1038,11 +1040,10 @@ class HyVideoSampler:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
+    def process(self, model, device, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
                 samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None):
         model = model.model
 
-        device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         dtype = model["dtype"]
         transformer = model["pipe"].transformer
@@ -1157,6 +1158,7 @@ class HyVideoDecode:
                     "temporal_tiling_sample_size": ("INT", {"default": 64, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64, any other value will cause stutter"}),
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
+                    "device": ([f"cuda:{i}" for i in range(torch.cuda.device_count())],),
                     },
                 }
 
@@ -1165,8 +1167,7 @@ class HyVideoDecode:
     FUNCTION = "decode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size):
-        device = mm.get_torch_device()
+    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size, device):
         offload_device = mm.unet_offload_device()
         mm.soft_empty_cache()
         latents = samples["samples"]
@@ -1241,6 +1242,7 @@ class HyVideoEncode:
                     "temporal_tiling_sample_size": ("INT", {"default": 64, "min": 4, "max": 256, "tooltip": "Smaller values use less VRAM, model default is 64, any other value will cause stutter"}),
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
+                    "device": ([f"cuda:{i}" for i in range(torch.cuda.device_count())],),
                     },
                 }
 
@@ -1249,8 +1251,7 @@ class HyVideoEncode:
     FUNCTION = "encode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size):
-        device = mm.get_torch_device()
+    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size, device):
         offload_device = mm.unet_offload_device()
 
         generator = torch.Generator(device=torch.device("cpu"))#.manual_seed(seed)
