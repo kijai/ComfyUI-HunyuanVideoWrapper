@@ -1,0 +1,15 @@
+[project]
+name = "comfyui-hunyuanvideowrapper"
+description = "ComfyUI diffusers wrapper nodes for [a/HunyuanVideo](https://github.com/Tencent/HunyuanVideo)"
+version = "1.0.0"
+license = {file = "LICENSE"}
+dependencies = ["accelerate >= 1.2.1", "diffusers >= 0.31.0", "transformers >= 4.47.0", "jax >= 0.4.28"]
+
+[project.urls]
+Repository = "https://github.com/kijai/ComfyUI-HunyuanVideoWrapper"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "ComfyUI-HunyuanVideoWrapper"
+Icon = ""
