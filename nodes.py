@@ -1306,6 +1306,29 @@ class HyVideoSampler:
         dtype = model["dtype"]
         transformer = model["pipe"].transformer
 
+        # Initialize FETA if enabled
+        if feta_args is not None:
+            from .enhance_a_video.globals import (
+                set_num_frames, 
+                set_enhance_weight, 
+                enable_enhance,
+                disable_enhance
+            )
+            
+            # First disable enhance to ensure clean state
+            disable_enhance()
+            
+            # Calculate frames in latent space ((num_frames - 1) // 4 + 1)
+            latent_frames = (num_frames - 1) // 4 + 1
+            set_num_frames(latent_frames)
+            set_enhance_weight(feta_args["weight"])
+            
+            # Enable enhance based on feta_args settings
+            enable_enhance(
+                single=feta_args["single_blocks"],
+                double=feta_args["double_blocks"]
+            )
+        
         # Initialize TeaCache if enabled
         if teacache_args is not None and teacache_args["enable_teacache"]:
             # Check if dimensions have changed since last run
