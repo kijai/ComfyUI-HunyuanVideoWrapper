@@ -79,6 +79,7 @@ class HyVideoInverseSampler:
             },
             "optional": {
                 "interpolation_curve": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "forceInput": True, "tooltip": "The strength of the inversed latents along time, in latent space"}),
+                "cuda_device": ("CUDADEVICE", ),
             }    
         }
 
@@ -87,9 +88,9 @@ class HyVideoInverseSampler:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, samples, gamma, start_step, end_step, gamma_trend, force_offload, interpolation_curve=None):
+    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, samples, gamma, start_step, end_step, gamma_trend, force_offload, interpolation_curve=None, cuda_device=None):
         model = model.model
-        device = mm.get_torch_device()
+        device = mm.get_torch_device() if cuda_device is None else cuda_device
         offload_device = mm.unet_offload_device()
         dtype = model["dtype"]
         transformer = model["pipe"].transformer
@@ -294,6 +295,7 @@ class HyVideoReSampler:
             "optional": {
                 "interpolation_curve": ("FLOAT", {"forceInput": True, "tooltip": "The strength of the inversed latents along time, in latent space"}),
                 "feta_args": ("FETAARGS", ),
+                "cuda_device": ("CUDADEVICE", ),
 
             }
         }
@@ -304,9 +306,9 @@ class HyVideoReSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, 
-                samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None, feta_args=None):
+                samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None, feta_args=None, cuda_device=None):
         model = model.model
-        device = mm.get_torch_device()
+        device = mm.get_torch_device() if cuda_device is None else cuda_device
         offload_device = mm.unet_offload_device()
         dtype = model["dtype"]
         transformer = model["pipe"].transformer
