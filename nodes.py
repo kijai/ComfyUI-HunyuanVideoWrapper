@@ -225,6 +225,7 @@ class HyVideoModelLoader:
                 "block_swap_args": ("BLOCKSWAPARGS", ),
                 "lora": ("HYVIDLORA", {"default": None}),
                 "auto_cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "Enable auto offloading for reduced VRAM usage, implementation from DiffSynth-Studio, slightly different from block swapping and uses even less VRAM, but can be slower as you can't define how much VRAM to use"}),
+                "cuda_device": ("CUDADEVICE", ),
             }
         }
 
@@ -234,7 +235,7 @@ class HyVideoModelLoader:
     CATEGORY = "HunyuanVideoWrapper"
 
     def loadmodel(self, model, base_precision, load_device,  quantization,
-                  compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False):
+                  compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False,cuda_device=None):
         transformer = None
         #mm.unload_all_models()
         mm.soft_empty_cache()
@@ -245,7 +246,7 @@ class HyVideoModelLoader:
             except Exception as e:
                 raise ValueError(f"Can't import SageAttention: {str(e)}")
 
-        device = mm.get_torch_device()
+        device = mm.get_torch_device() if cuda_device is None else cuda_device
         offload_device = mm.unet_offload_device()
         manual_offloading = True
         transformer_load_device = device if load_device == "main_device" else offload_device
@@ -462,6 +463,7 @@ class HyVideoVAELoader:
                     {"default": "bf16"}
                 ),
                 "compile_args":("COMPILEARGS", ),
+                "cuda_device": ("CUDADEVICE", ),
             }
         }
 
@@ -471,9 +473,9 @@ class HyVideoVAELoader:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan VAE model from 'ComfyUI/models/vae'"
 
-    def loadmodel(self, model_name, precision, compile_args=None):
+    def loadmodel(self, model_name, precision, compile_args=None, cuda_device=None):
 
-        device = mm.get_torch_device()
+        device = mm.get_torch_device() if cuda_device is None else cuda_device
         offload_device = mm.unet_offload_device()
 
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
@@ -557,6 +559,7 @@ class DownloadAndLoadHyVideoTextEncoder:
                 "apply_final_norm": ("BOOLEAN", {"default": False}),
                 "hidden_state_skip_layer": ("INT", {"default": 2}),
                 "quantization": (['disabled', 'bnb_nf4', "fp8_e4m3fn"], {"default": 'disabled'}),
+                "cuda_device": ("CUDADEVICE", ),
             }
         }
 
@@ -566,13 +569,13 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
+    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled", cuda_device=None):
         lm_type_mapping = {
             "Kijai/llava-llama-3-8b-text-encoder-tokenizer": "llm",
             "xtuner/llava-llama-3-8b-v1_1-transformers": "vlm",
         }
         lm_type = lm_type_mapping[llm_model]
-        device = mm.get_torch_device()
+        device = mm.get_torch_device() if cuda_device is None else cuda_device
         offload_device = mm.unet_offload_device()
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         quantization_config = None
@@ -694,6 +697,7 @@ class HyVideoTextEncode:
                 "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
                 "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
                 "hyvid_cfg": ("HYVID_CFG", ),
+                "cuda_device": ("CUDADEVICE", ),
             }
         }
 
@@ -702,10 +706,10 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None, cuda_device=None):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
-        device = mm.text_encoder_device()
+        device = mm.get_torch_device() if cuda_device is None else cuda_device
         offload_device = mm.text_encoder_offload_device()
 
         text_encoder_1 = text_encoders["text_encoder"]
@@ -1058,6 +1062,7 @@ class HyVideoSampler:
                 "stg_args": ("STGARGS", ),
                 "context_options": ("COGCONTEXT", ),
                 "feta_args": ("FETAARGS", ),
+                "cuda_device": ("CUDADEVICE", ),
             }
         }
 
@@ -1066,11 +1071,10 @@ class HyVideoSampler:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None):
+    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames,
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, cuda_device=None):
         model = model.model
-
-        device = mm.get_torch_device()
+        device = mm.get_torch_device() if cuda_device is None else cuda_device
         offload_device = mm.unet_offload_device()
         dtype = model["dtype"]
         transformer = model["pipe"].transformer
@@ -1190,6 +1194,9 @@ class HyVideoDecode:
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
                     },
+                "optional": {
+                    "cuda_device": ("CUDADEVICE", ),
+                    },
                 }
 
     RETURN_TYPES = ("IMAGE",)
@@ -1197,8 +1204,8 @@ class HyVideoDecode:
     FUNCTION = "decode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size):
-        device = mm.get_torch_device()
+    def decode(self, vae, samples, enable_vae_tiling, temporal_tiling_sample_size, spatial_tile_sample_min_size, auto_tile_size, cuda_device=None):
+        device = mm.get_torch_device() if cuda_device is None else cuda_device
         offload_device = mm.unet_offload_device()
         mm.soft_empty_cache()
         latents = samples["samples"]
@@ -1274,6 +1281,9 @@ class HyVideoEncode:
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
                     },
+                "optional": {
+                    "cuda_device": ("CUDADEVICE", ),
+                    },
                 }
 
     RETURN_TYPES = ("LATENT",)
@@ -1281,8 +1291,8 @@ class HyVideoEncode:
     FUNCTION = "encode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size):
-        device = mm.get_torch_device()
+    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size, cuda_device=None):
+        device = mm.get_torch_device() if cuda_device is None else cuda_device
         offload_device = mm.unet_offload_device()
 
         generator = torch.Generator(device=torch.device("cpu"))#.manual_seed(seed)
@@ -1387,6 +1397,30 @@ class HyVideoLatentPreview:
 
         return (latent_images.float().cpu(), out_factors)
 
+class HyVideoCudaSelect:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "cuda_device": ([f"cuda:{i}" for i in range(torch.cuda.device_count())],),
+            }
+        }
+
+    RETURN_TYPES = ("CUDADEVICE",)
+    RETURN_NAMES = ("cuda_device",)
+    FUNCTION = "select_device"
+
+    CATEGORY = "HunyuanVideoWrapper"
+
+    def select_device(self, cuda_device):
+        if not cuda_device:
+            raise ValueError("No CUDA device selected.")
+
+        # Return the selected device
+        print (cuda_device,)
+        return (cuda_device,)
+    
+
 NODE_CLASS_MAPPINGS = {
     "HyVideoSampler": HyVideoSampler,
     "HyVideoDecode": HyVideoDecode,
@@ -1408,6 +1442,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoTextEmbedsLoad": HyVideoTextEmbedsLoad,
     "HyVideoContextOptions": HyVideoContextOptions,
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
+    "HyVideoCudaSelect": HyVideoCudaSelect,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1430,4 +1465,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoTextEmbedsLoad": "HunyuanVideo TextEmbeds Load",
     "HyVideoContextOptions": "HunyuanVideo Context Options",
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
+    "HyVideoCudaSelect": "HunyuanVideo Cuda Device Selector",
     }
