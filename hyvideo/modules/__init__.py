@@ -1,3 +1,1 @@
-from .models import HYVideoDiffusionTransformer, HUNYUAN_VIDEO_CONFIG
-
-
+from .models import HYVideoDiffusionTransformer

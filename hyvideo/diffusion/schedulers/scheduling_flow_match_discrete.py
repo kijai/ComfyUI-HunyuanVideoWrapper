@@ -71,7 +71,7 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
     def __init__(
         self,
         num_train_timesteps: int = 1000,
-        shift: float = 1.0,
+        flow_shift: float = 1.0,
         reverse: bool = True,
         solver: str = "euler",
         n_tokens: Optional[int] = None,
@@ -80,7 +80,7 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
         print("Scheduler config:", self.config)
         if not reverse:
             sigmas = sigmas.flip(0)
-        self.shift = shift
+        self.flow_shift = flow_shift
 
         self.sigmas = sigmas
         # the value fed to model
@@ -184,7 +184,7 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
         return sample
 
     def sd3_time_shift(self, t: torch.Tensor):
-        return (self.shift * t) / (1 + (self.shift - 1) * t)
+        return (self.flow_shift * t) / (1 + (self.flow_shift - 1) * t)
 
     def step(
         self,

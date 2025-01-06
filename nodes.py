@@ -10,6 +10,28 @@ from .hyvideo.constants import PROMPT_TEMPLATE
 from .hyvideo.text_encoder import TextEncoder
 from .hyvideo.utils.data_utils import align_to
 from .hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
+
+from .scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
+
+# from diffusers.schedulers import ( 
+#     DDIMScheduler, 
+#     PNDMScheduler, 
+#     DPMSolverMultistepScheduler, 
+#     EulerDiscreteScheduler, 
+#     EulerAncestralDiscreteScheduler,
+#     UniPCMultistepScheduler,
+#     HeunDiscreteScheduler,
+#     SASolverScheduler,
+#     DEISMultistepScheduler,
+#     LCMScheduler
+#     )
+
+scheduler_mapping = {
+    "FlowMatchDiscreteScheduler": FlowMatchDiscreteScheduler,
+    "DPMSolverMultistepScheduler": DPMSolverMultistepScheduler,
+}
+
+available_schedulers = list(scheduler_mapping.keys())
 from .hyvideo.diffusion.pipelines import HunyuanVideoPipeline
 from .hyvideo.vae.autoencoder_kl_causal_3d import AutoencoderKLCausal3D
 from .hyvideo.modules.models import HYVideoDiffusionTransformer
@@ -175,6 +197,27 @@ class HyVideoSTG:
     def setargs(self, **kwargs):
         return (kwargs, )
 
+class HyVideoTeaCache:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "rel_l1_thresh": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01,
+                                            "tooltip": "Higher values will make TeaCache more aggressive, faster, but may cause artifacts"}),
+            },
+        }
+    RETURN_TYPES = ("TEACACHEARGS",)
+    RETURN_NAMES = ("teacache_args",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "TeaCache settings for HunyuanVideo to speed up inference"
+
+    def process(self, rel_l1_thresh):
+        teacache_args = {
+            "rel_l1_thresh": rel_l1_thresh,
+        }
+        return (teacache_args,)
+
 
 class HyVideoModel(comfy.model_base.BaseModel):
     def __init__(self, *args, **kwargs):
@@ -284,11 +327,15 @@ class HyVideoModelLoader:
             model_type=comfy.model_base.ModelType.FLOW,
             device=device,
         )
-        scheduler = FlowMatchDiscreteScheduler(
-            shift=9.0,
-            reverse=True,
-            solver="euler",
-        )
+        scheduler_config = {
+            "flow_shift": 9.0,
+            "reverse": True,
+            "solver": "euler",
+            "use_flow_sigmas": True, 
+            "prediction_type": 'flow_prediction'
+        }
+        scheduler = FlowMatchDiscreteScheduler.from_config(scheduler_config)
+        print(scheduler.config)
         pipe = HunyuanVideoPipeline(
             transformer=transformer,
             scheduler=scheduler,
@@ -446,6 +493,7 @@ class HyVideoModelLoader:
         patcher.model["quantization"] = "disabled"
         patcher.model["block_swap_args"] = block_swap_args
         patcher.model["auto_cpu_offload"] = auto_cpu_offload
+        patcher.model["scheduler_config"] = scheduler_config
 
         return (patcher,)
 
@@ -1063,6 +1111,11 @@ class HyVideoSampler:
                 "context_options": ("COGCONTEXT", ),
                 "feta_args": ("FETAARGS", ),
                 "cuda_device": ("CUDADEVICE", ),
+                "teacache_args": ("TEACACHEARGS", ),
+                "scheduler": (available_schedulers,
+                    {
+                        "default": 'FlowMatchDiscreteScheduler'
+                    }),
             }
         }
 
@@ -1072,9 +1125,10 @@ class HyVideoSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames,
-                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, cuda_device=None):
+                samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, cuda_device=None,  teacache_args=None, scheduler=None):
         model = model.model
         device = mm.get_torch_device() if cuda_device is None else cuda_device
+        offload_device = mm.unet_offload_device()
         offload_device = mm.unet_offload_device()
         dtype = model["dtype"]
         transformer = model["pipe"].transformer
@@ -1113,7 +1167,12 @@ class HyVideoSampler:
         target_height = align_to(height, 16)
         target_width = align_to(width, 16)
 
-        model["pipe"].scheduler.shift = flow_shift
+        model["scheduler_config"]["flow_shift"] = flow_shift
+        model["scheduler_config"]["algorithm_type"] = "sde-dpmsolver++"
+        
+        noise_scheduler = scheduler_mapping[scheduler].from_config(model["scheduler_config"])
+        model["pipe"].scheduler = noise_scheduler
+        #model["pipe"].scheduler.flow_shift = flow_shift
 
         if model["block_swap_args"] is not None:
             for name, param in transformer.named_parameters():
@@ -1132,6 +1191,27 @@ class HyVideoSampler:
                     param.data = param.data.to(device)
         elif model["manual_offloading"]:
             transformer.to(device)
+
+        # Initialize TeaCache if enabled
+        if teacache_args is not None:
+            # Check if dimensions have changed since last run
+            if (not hasattr(transformer, 'last_dimensions') or
+                    transformer.last_dimensions != (height, width, num_frames) or
+                    not hasattr(transformer, 'last_frame_count') or
+                    transformer.last_frame_count != num_frames):
+                # Reset TeaCache state on dimension change
+                transformer.cnt = 0
+                transformer.accumulated_rel_l1_distance = 0
+                transformer.previous_modulated_input = None
+                transformer.previous_residual = None
+                transformer.last_dimensions = (height, width, num_frames)
+                transformer.last_frame_count = num_frames
+
+            transformer.enable_teacache = True
+            transformer.num_steps = steps
+            transformer.rel_l1_thresh = teacache_args["rel_l1_thresh"]
+        else:
+            transformer.enable_teacache = False
 
         mm.soft_empty_cache()
         gc.collect()
@@ -1443,6 +1523,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoContextOptions": HyVideoContextOptions,
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
     "HyVideoCudaSelect": HyVideoCudaSelect,
+    "HyVideoTeaCache": HyVideoTeaCache,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1466,4 +1547,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoContextOptions": "HunyuanVideo Context Options",
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
     "HyVideoCudaSelect": "HunyuanVideo Cuda Device Selector",
+    "HyVideoTeaCache": "HunyuanVideo TeaCache",
     }

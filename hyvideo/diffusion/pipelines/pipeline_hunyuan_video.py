@@ -29,6 +29,7 @@ from diffusers.utils import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.schedulers import DPMSolverMultistepScheduler
 
 from ...modules import HYVideoDiffusionTransformer
 from comfy.utils import ProgressBar
@@ -636,6 +637,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
         comfy_pbar = ProgressBar(len(timesteps))
         with self.progress_bar(total=len(timesteps)) as progress_bar:
+            old_pred_original_sample = None # for DPM-solver++
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
