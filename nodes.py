@@ -1281,26 +1281,8 @@ class HyVideoTextEncode:
                 "`prompt_template['template']` must contain a placeholder `{}` for the input text, "
                 f"got {prompt_template_dict['template']}"
             )
-            # --- Apply and debug print the template ---
-            prompt_with_template = text_encoder_1.apply_text_to_template(
-                prompt, prompt_template_dict["template"]
-            )
-            log.debug(
-                f"HyVideoTextEncode: Prompt with template: {prompt_with_template}"
-            )
-
-            # --- Debug: Check for truncation and log token count ---
-            prompt_tokens = text_encoder_1.tokenizer(
-                prompt_with_template, return_length=True, return_tensors="pt"
-            )
-            token_count = prompt_tokens["length"][0].item()
-            if token_count > text_encoder_1.max_length:
-                log.info(
-                    f"HyVideoTextEncode: Prompt with template is {token_count} tokens long, which is longer than max_context_length ({text_encoder_1.max_length}). It will be truncated."
-                )
         else:
             prompt_template_dict = None
-            prompt_with_template = prompt  # No template applied
 
         def encode_prompt(
             self,
@@ -1441,8 +1423,7 @@ class HyVideoTextEncode:
                 negative_attention_mask_2,
             ) = encode_prompt(
                 self,
-                prompt_with_template,  # Use the prompt_with_template here
-                # prompt,
+                prompt,
                 negative_prompt,
                 text_encoder_2,
                 clip_text_override=clip_text_override,
