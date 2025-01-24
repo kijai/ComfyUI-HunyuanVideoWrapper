@@ -5,6 +5,7 @@ import gc
 from .utils import log, print_memory
 from diffusers.video_processor import VideoProcessor
 from typing import List, Dict, Any, Tuple
+from nodes import LoraLoader
 
 from .hyvideo.constants import PROMPT_TEMPLATE
 from .hyvideo.text_encoder import TextEncoder
@@ -14,19 +15,6 @@ from .hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
 from .hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 from .hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
 from. hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
-
-# from diffusers.schedulers import ( 
-#     DDIMScheduler, 
-#     PNDMScheduler, 
-#     DPMSolverMultistepScheduler, 
-#     EulerDiscreteScheduler, 
-#     EulerAncestralDiscreteScheduler,
-#     UniPCMultistepScheduler,
-#     HeunDiscreteScheduler,
-#     SASolverScheduler,
-#     DEISMultistepScheduler,
-#     LCMScheduler
-#     )
 
 scheduler_mapping = {
     "FlowMatchDiscreteScheduler": FlowMatchDiscreteScheduler,
@@ -77,6 +65,77 @@ def standardize_lora_key_format(lora_sd):
         new_sd[k] = v
     return new_sd
 
+class HunyuanVideoMultiLoraSelect:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "lora_01": (['None'] + folder_paths.get_filename_list("loras"),),
+                "strength_01": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "lora_02": (['None'] + folder_paths.get_filename_list("loras"),),
+                "strength_02": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "lora_03": (['None'] + folder_paths.get_filename_list("loras"),),
+                "strength_03": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "lora_04": (['None'] + folder_paths.get_filename_list("loras"),),
+                "strength_04": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            },
+            "optional": {
+                "blocks": ("SELECTEDBLOCKS",),
+            }
+        }
+
+    RETURN_TYPES = ("HYVIDLORA",)
+    RETURN_NAMES = ("lora", )
+    FUNCTION = "getlorapath"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "Select multiple LoRA models from ComfyUI/models/loras"
+
+    def getlorapath(self, lora_01, strength_01, lora_02, strength_02, lora_03, strength_03, lora_04, strength_04, blocks=None):
+        loras_list = []
+
+        # Load the first LoRA if specified
+        if lora_01 != "None" and strength_01 != 0:
+            lora = {
+                "path": folder_paths.get_full_path("loras", lora_01),
+                "strength": strength_01,
+                "name": lora_01.split(".")[0],
+                "blocks": blocks
+            }
+            loras_list.append(lora)
+
+        # Load the second LoRA if specified
+        if lora_02 != "None" and strength_02 != 0:
+            lora = {
+                "path": folder_paths.get_full_path("loras", lora_02),
+                "strength": strength_02,
+                "name": lora_02.split(".")[0],
+                "blocks": blocks
+            }
+            loras_list.append(lora)
+
+        # Load the third LoRA if specified
+        if lora_03 != "None" and strength_03 != 0:
+            lora = {
+                "path": folder_paths.get_full_path("loras", lora_03),
+                "strength": strength_03,
+                "name": lora_03.split(".")[0],
+                "blocks": blocks
+            }
+            loras_list.append(lora)
+
+        # Load the fourth LoRA if specified
+        if lora_04 != "None" and strength_04 != 0:
+            lora = {
+                "path": folder_paths.get_full_path("loras", lora_04),
+                "strength": strength_04,
+                "name": lora_04.split(".")[0],
+                "blocks": blocks
+            }
+            loras_list.append(lora)
+
+        return (loras_list,)
+
+
 class HyVideoLoraBlockEdit:
     def __init__(self):
         self.loaded_lora = None
@@ -105,6 +164,7 @@ class HyVideoLoraBlockEdit:
         selected_blocks = {k: v for k, v in kwargs.items() if v is True}
         print("Selected blocks: ", selected_blocks)
         return (selected_blocks,)
+
 class HyVideoLoraSelect:
     @classmethod
     def INPUT_TYPES(s):
@@ -557,8 +617,6 @@ class HyVideoVAELoader:
             
 
         return (vae,)
-
-
 
 class HyVideoTorchCompileSettings:
     @classmethod
@@ -1486,6 +1544,7 @@ class HyVideoLatentPreview:
         return (latent_images.float().cpu(), out_factors)
 
 NODE_CLASS_MAPPINGS = {
+    "HunyuanVideoMultiLoraSelect": HunyuanVideoMultiLoraSelect,
     "HyVideoSampler": HyVideoSampler,
     "HyVideoDecode": HyVideoDecode,
     "HyVideoTextEncode": HyVideoTextEncode,
@@ -1507,8 +1566,10 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoContextOptions": HyVideoContextOptions,
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
     "HyVideoTeaCache": HyVideoTeaCache,
-    }
+}
+
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "HunyuanVideoMultiLoraSelect": "HunyuanVideo Multi-Lora Select",
     "HyVideoSampler": "HunyuanVideo Sampler",
     "HyVideoDecode": "HunyuanVideo Decode",
     "HyVideoTextEncode": "HunyuanVideo TextEncode",
@@ -1530,4 +1591,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoContextOptions": "HunyuanVideo Context Options",
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
     "HyVideoTeaCache": "HunyuanVideo TeaCache",
-    }
+}        
