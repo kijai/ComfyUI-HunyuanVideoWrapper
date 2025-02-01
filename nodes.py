@@ -50,6 +50,11 @@ import comfy.model_management as mm
 from comfy.utils import load_torch_file, save_torch_file
 import comfy.model_base
 import comfy.latent_formats
+import logging
+
+#--- Logging Configuration ---
+# Set to DEBUG to see detailed information, INFO for normal operation
+log.setLevel(logging.DEBUG)
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -626,15 +631,25 @@ class DownloadAndLoadHyVideoTextEncoder:
             "required": {
                 "llm_model": (["Kijai/llava-llama-3-8b-text-encoder-tokenizer","xtuner/llava-llama-3-8b-v1_1-transformers"],),
                 "clip_model": (["disabled","openai/clip-vit-large-patch14",],),
-                 "precision": (["fp16", "fp32", "bf16"],
-                    {"default": "bf16"}
-                ),
+                "precision": (["fp16", "fp32", "bf16"], {"default": "bf16"}),
             },
             "optional": {
                 "apply_final_norm": ("BOOLEAN", {"default": False}),
                 "hidden_state_skip_layer": ("INT", {"default": 2}),
                 "quantization": (['disabled', 'bnb_nf4', "fp8_e4m3fn"], {"default": 'disabled'}),
-            }
+                # Note: Changing max_context_length is experimental and may cause instability or higher memory use
+                # max_context_length = 8192 is based on: https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers/blob/main/config.json
+                "max_context_length": (  # Remove outer tuple
+                    "INT",
+                    {
+                        "default": 256,  # HunyuanVideo default is 256
+                        "min": 1,
+                        "max": 8192,  # Max context length for the LLM
+                        "step": 1,
+                        "tooltip": "The maximum context length / max tokens for the LLM. Default is 256. Changing this is experimental and may cause instability in generation and performance, higher memory usage, or system crashes.",
+                    }
+                ),
+            },
         }
 
     RETURN_TYPES = ("HYVIDTEXTENCODER",)
@@ -643,7 +658,8 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled"):
+    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled", max_context_length=256):
+
         lm_type_mapping = {
             "Kijai/llava-llama-3-8b-text-encoder-tokenizer": "llm",
             "xtuner/llava-llama-3-8b-v1_1-transformers": "vlm",
@@ -697,10 +713,16 @@ class DownloadAndLoadHyVideoTextEncoder:
                 local_dir=base_path,
                 local_dir_use_symlinks=False,
             )
+            
+         # DEBUG: Log the max_length used by the TextEncoder
+        log.debug(
+            f"DownloadAndLoadHyVideoTextEncoder: Loading text encoder with max_context_length: {max_context_length}"
+        )
+
         text_encoder = TextEncoder(
             text_encoder_path=base_path,
             text_encoder_type=lm_type,
-            max_length=256,
+            max_length=max_context_length,  # Pass max_context_length here
             text_encoder_precision=precision,
             tokenizer_type=lm_type,
             hidden_state_skip_layer=hidden_state_skip_layer,
@@ -710,6 +732,12 @@ class DownloadAndLoadHyVideoTextEncoder:
             dtype=dtype,
             quantization_config=quantization_config
         )
+        
+        # DEBUG: Log the max_length used by the TextEncoder
+        log.debug(
+            f"[[DEBUG]] DownloadAndLoadHyVideoTextEncoder: TextEncoder initialized with max_length: {text_encoder.max_length}"
+        )
+        
         if quantization == "fp8_e4m3fn":
             text_encoder.is_fp8 = True
             text_encoder.to(torch.float8_e4m3fn)
@@ -771,6 +799,7 @@ class HyVideoTextEncode:
                 "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
                 "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
                 "hyvid_cfg": ("HYVID_CFG", ),
+                "crop_prompt": ("BOOLEAN", {"default": False, "tooltip": "Enable prompt cropping based on the selected template's crop_start value"}),
             }
         }
 
@@ -779,7 +808,7 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None, crop_prompt=False):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
         device = mm.text_encoder_device()
@@ -818,9 +847,18 @@ class HyVideoTextEncode:
         else:
             prompt_template_dict = None
 
-        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None):
+        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None, max_context_length=None):
             batch_size = 1
             num_videos_per_prompt = 1
+
+            # Apply prompt template (if enabled) and crop prompt (if enabled)
+            if prompt_template_dict is not None and "template" in prompt_template_dict:
+                if crop_prompt:
+                    crop_start = prompt_template_dict.get("crop_start", 0)
+                    if crop_start > 0:
+                        prompt = prompt[crop_start:]
+                        if negative_prompt:
+                            negative_prompt = negative_prompt[crop_start:]
 
             text_inputs = text_encoder.text2tokens(prompt, 
                                                    prompt_template=prompt_template_dict,
@@ -830,7 +868,8 @@ class HyVideoTextEncode:
             prompt_outputs = text_encoder.encode(text_inputs, 
                                                  prompt_template=prompt_template_dict, 
                                                  image_token_selection_expr=image_token_selection_expr, 
-                                                 device=device
+                                                 device=device,
+                                                 max_context_length=max_context_length
                                                  )
             prompt_embeds = prompt_outputs.hidden_state
 
@@ -871,7 +910,7 @@ class HyVideoTextEncode:
                 uncond_input = text_encoder.text2tokens(uncond_tokens, prompt_template=prompt_template_dict)
 
                 negative_prompt_outputs = text_encoder.encode(
-                    uncond_input, prompt_template=prompt_template_dict, device=device
+                    uncond_input, prompt_template=prompt_template_dict, device=device, max_context_length=max_context_length
                 )
                 negative_prompt_embeds = negative_prompt_outputs.hidden_state
 
@@ -896,21 +935,24 @@ class HyVideoTextEncode:
                 negative_attention_mask,
             )
         text_encoder_1.to(device)
+        
+        # Get max_context_length from text_encoder_1
+        max_context_length = text_encoder_1.max_length
+        
         with torch.autocast(device_type=mm.get_autocast_device(device), dtype=text_encoder_1.dtype, enabled=text_encoder_1.is_fp8):
             prompt_embeds, negative_prompt_embeds, attention_mask, negative_attention_mask = encode_prompt(self,
                                                                                                             prompt,
                                                                                                             negative_prompt, 
                                                                                                             text_encoder_1, 
                                                                                                             image_token_selection_expr=image_token_selection_expr,
-                                                                                                            image1=image1,
-                                                                                                            image2=image2)
+                                                                                                            max_context_length=max_context_length)  # Pass max_context_length here
         if force_offload:
             text_encoder_1.to(offload_device)
             mm.soft_empty_cache()
 
         if text_encoder_2 is not None:
             text_encoder_2.to(device)
-            prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = encode_prompt(self, prompt, negative_prompt, text_encoder_2, clip_text_override=clip_text_override)
+            prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = encode_prompt(self, prompt, negative_prompt, text_encoder_2, clip_text_override=clip_text_override, max_context_length=max_context_length) # Pass max_context_length here
             if force_offload:
                 text_encoder_2.to(offload_device)
                 mm.soft_empty_cache()
@@ -970,6 +1012,13 @@ class HyVideoTextImageEncode(HyVideoTextEncode):
                 "image2": ("IMAGE", {"default": None}),
                 "clip_text_override": ("STRING", {"default": "", "multiline": True} ),
                 "hyvid_cfg": ("HYVID_CFG", ),
+                "crop_prompt": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Enable prompt cropping based on the selected template's crop_start value",
+                    },
+                ),
             }
         }
 
