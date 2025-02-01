@@ -15,7 +15,6 @@ from PIL import Image
 def use_default(value, default):
     return value if value is not None else default
 
-
 def load_text_encoder(
     text_encoder_type,
     text_encoder_precision=None,
@@ -65,7 +64,6 @@ def load_text_encoder(
 
     return text_encoder, text_encoder_path
 
-
 def load_tokenizer(
     tokenizer_type, tokenizer_path=None, padding_side="right", logger=None
 ):
@@ -84,7 +82,6 @@ def load_tokenizer(
         raise ValueError(f"Unsupported tokenizer type: {tokenizer_type}")
 
     return tokenizer, tokenizer_path
-
 
 @dataclass
 class TextEncoderModelOutput(ModelOutput):
@@ -108,7 +105,6 @@ class TextEncoderModelOutput(ModelOutput):
     attention_mask: Optional[torch.LongTensor] = None
     hidden_states_list: Optional[Tuple[torch.FloatTensor, ...]] = None
     text_outputs: Optional[list] = None
-
 
 class TextEncoder(nn.Module):
     def __init__(
@@ -278,6 +274,7 @@ class TextEncoder(nn.Module):
         prompt_template=None,
         image_token_selection_expr="::4",
         device=None,
+        max_context_length=None,  # Add max_context_length here
     ):
         """
         Args:
@@ -292,6 +289,7 @@ class TextEncoder(nn.Module):
             hidden_state_skip_layer (int): Number of hidden states to hidden_state_skip_layer. 0 means the last layer.
                 If None, self.output_key will be used. Defaults to None.
             return_texts (bool): Whether to return the decoded texts. Defaults to False.
+            max_context_length (int): Maximum context length for the text encoder.
         """
         device = self.model.device if device is None else device
         use_attention_mask = use_default(use_attention_mask, self.use_attention_mask)
@@ -304,11 +302,23 @@ class TextEncoder(nn.Module):
         )
         for k,v in batch_encoding.items():
             batch_encoding[k] = v.to(device) if isinstance(v, torch.Tensor) else v
-        outputs = self.model(
-            **batch_encoding,
-            output_hidden_states=output_hidden_states
-            or hidden_state_skip_layer is not None,
-        )
+        
+        # Use max_context_length if provided, otherwise fall back to self.max_length
+        max_length = max_context_length if max_context_length is not None else self.max_length
+
+        if self.text_encoder_type == "vlm":
+            outputs = self.model.language_model(
+                **batch_encoding,
+                output_hidden_states=output_hidden_states
+                or hidden_state_skip_layer is not None,
+                max_length=max_length  # Pass max_context_length to the model
+            )
+        else:
+            outputs = self.model(
+                **batch_encoding,
+                output_hidden_states=output_hidden_states
+                or hidden_state_skip_layer is not None,
+            )
 
         if hidden_state_skip_layer is not None:
             last_hidden_state = outputs.hidden_states[-(hidden_state_skip_layer + 1)]
