@@ -1,11 +1,22 @@
+# Ignore specific directories
 output/
-*__pycache__/
 samples*/
 runs/
 checkpoints/
-master_ip
 logs/
-*.DS_Store
-.idea
 tools/
+
+# Ignore specific files
+*.DS_Store
+master_ip
+tree_migration.md
+
+# Ignore __pycache__ directories anywhere in the project
+**/__pycache__/
+
+# Ignore .idea and .vscode directories (IDE-specific)
+.idea/
 .vscode/
+
+# Ignore .ipynb_checkpoints (Jupyter Notebook checkpoints)
+.ipynb_checkpoints/

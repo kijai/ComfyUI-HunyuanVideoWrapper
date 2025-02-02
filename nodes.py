@@ -14,6 +14,7 @@ from .hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
 from .hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 from .hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
 from. hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
+import logging
 
 # from diffusers.schedulers import ( 
 #     DDIMScheduler, 
@@ -27,6 +28,10 @@ from. hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultis
 #     DEISMultistepScheduler,
 #     LCMScheduler
 #     )
+
+## --- Logging Configuration ---
+# Set to DEBUG to see detailed information, INFO for normal operation
+log.setLevel(logging.DEBUG)
 
 scheduler_mapping = {
     "FlowMatchDiscreteScheduler": FlowMatchDiscreteScheduler,
@@ -50,11 +55,6 @@ import comfy.model_management as mm
 from comfy.utils import load_torch_file, save_torch_file
 import comfy.model_base
 import comfy.latent_formats
-import logging
-
-#--- Logging Configuration ---
-# Set to DEBUG to see detailed information, INFO for normal operation
-log.setLevel(logging.DEBUG)
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -631,12 +631,15 @@ class DownloadAndLoadHyVideoTextEncoder:
             "required": {
                 "llm_model": (["Kijai/llava-llama-3-8b-text-encoder-tokenizer","xtuner/llava-llama-3-8b-v1_1-transformers"],),
                 "clip_model": (["disabled","openai/clip-vit-large-patch14",],),
-                "precision": (["fp16", "fp32", "bf16"], {"default": "bf16"}),
+                 "precision": (["fp16", "fp32", "bf16"],
+                    {"default": "bf16"}
+                ),
             },
             "optional": {
                 "apply_final_norm": ("BOOLEAN", {"default": False}),
                 "hidden_state_skip_layer": ("INT", {"default": 2}),
                 "quantization": (['disabled', 'bnb_nf4', "fp8_e4m3fn"], {"default": 'disabled'}),
+                "load_device": (["main_device", "offload_device"], {"default": "offload_device"}),
                 # Note: Changing max_context_length is experimental and may cause instability or higher memory use
                 # max_context_length = 8192 is based on: https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers/blob/main/config.json
                 "max_context_length": (  # Remove outer tuple
@@ -645,12 +648,13 @@ class DownloadAndLoadHyVideoTextEncoder:
                         "default": 256,  # HunyuanVideo default is 256
                         "min": 1,
                         "max": 8192,  # Max context length for the LLM
-                        "step": 1,
+                        "step": 4,
                         "tooltip": "The maximum context length / max tokens for the LLM. Default is 256. Changing this is experimental and may cause instability in generation and performance, higher memory usage, or system crashes.",
                     }
                 ),
             },
         }
+
 
     RETURN_TYPES = ("HYVIDTEXTENCODER",)
     RETURN_NAMES = ("hyvid_text_encoder", )
@@ -658,8 +662,7 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled", max_context_length=256):
-
+    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled", load_device="offload_device", max_context_length=256):
         lm_type_mapping = {
             "Kijai/llava-llama-3-8b-text-encoder-tokenizer": "llm",
             "xtuner/llava-llama-3-8b-v1_1-transformers": "vlm",
@@ -667,6 +670,9 @@ class DownloadAndLoadHyVideoTextEncoder:
         lm_type = lm_type_mapping[llm_model]
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+
+        text_encoder_load_device = device if load_device == "main_device" else offload_device
+
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         quantization_config = None
         if quantization == "bnb_nf4":
@@ -698,7 +704,7 @@ class DownloadAndLoadHyVideoTextEncoder:
             text_encoder_precision=precision,
             tokenizer_type="clipL",
             logger=log,
-            device=device,
+            device=text_encoder_load_device,
         )
         else:
             text_encoder_2 = None
@@ -715,9 +721,7 @@ class DownloadAndLoadHyVideoTextEncoder:
             )
             
          # DEBUG: Log the max_length used by the TextEncoder
-        log.debug(
-            f"DownloadAndLoadHyVideoTextEncoder: Loading text encoder with max_context_length: {max_context_length}"
-        )
+        log.debug(f"[[DEBUG]] DownloadAndLoadHyVideoTextEncoder: Node received max_context_length: {max_context_length}")
 
         text_encoder = TextEncoder(
             text_encoder_path=base_path,
@@ -728,16 +732,17 @@ class DownloadAndLoadHyVideoTextEncoder:
             hidden_state_skip_layer=hidden_state_skip_layer,
             apply_final_norm=apply_final_norm,
             logger=log,
-            device=device,
+            device=text_encoder_load_device,
             dtype=dtype,
             quantization_config=quantization_config
         )
         
+
         # DEBUG: Log the max_length used by the TextEncoder
         log.debug(
             f"[[DEBUG]] DownloadAndLoadHyVideoTextEncoder: TextEncoder initialized with max_length: {text_encoder.max_length}"
         )
-        
+
         if quantization == "fp8_e4m3fn":
             text_encoder.is_fp8 = True
             text_encoder.to(torch.float8_e4m3fn)
@@ -808,7 +813,7 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None, crop_prompt=False):
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
         device = mm.text_encoder_device()
@@ -847,9 +852,10 @@ class HyVideoTextEncode:
         else:
             prompt_template_dict = None
 
-        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None, max_context_length=None):
+        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None, max_context_length=None, crop_prompt=True):
             batch_size = 1
             num_videos_per_prompt = 1
+            
 
             # Apply prompt template (if enabled) and crop prompt (if enabled)
             if prompt_template_dict is not None and "template" in prompt_template_dict:
@@ -945,14 +951,16 @@ class HyVideoTextEncode:
                                                                                                             negative_prompt, 
                                                                                                             text_encoder_1, 
                                                                                                             image_token_selection_expr=image_token_selection_expr,
-                                                                                                            max_context_length=max_context_length)  # Pass max_context_length here
+                                                                                                            image1=image1,
+                                                                                                            image2=image2,
+                                                                                                            max_context_length=max_context_length)  # Pass max_context_length here)
         if force_offload:
             text_encoder_1.to(offload_device)
             mm.soft_empty_cache()
 
         if text_encoder_2 is not None:
             text_encoder_2.to(device)
-            prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = encode_prompt(self, prompt, negative_prompt, text_encoder_2, clip_text_override=clip_text_override, max_context_length=max_context_length) # Pass max_context_length here
+            prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = encode_prompt(self, prompt, negative_prompt, text_encoder_2, clip_text_override=clip_text_override, max_context_length=max_context_length) # Pass max_context_length here)
             if force_offload:
                 text_encoder_2.to(offload_device)
                 mm.soft_empty_cache()
@@ -1450,7 +1458,8 @@ class HyVideoEncode:
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
                     },
                     "optional": {
-                        "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation"}),
+                        "noise_aug_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of noise augmentation, helpful for leapfusion I2V where some noise can add motion and give sharper results"}),
+                        "latent_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Additional latent multiplier, helpful for leapfusion I2V where lower values allow for more motion"}),
                     }
                 }
 
@@ -1459,7 +1468,7 @@ class HyVideoEncode:
     FUNCTION = "encode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size, noise_aug_strength=0.0):
+    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
@@ -1486,6 +1495,8 @@ class HyVideoEncode:
         if enable_vae_tiling:
             vae.enable_tiling()
         latents = vae.encode(image).latent_dist.sample(generator)
+        if latent_strength != 1.0:
+            latents *= latent_strength
         #latents = latents * vae.config.scaling_factor
         vae.to(offload_device)
         print("encoded latents shape",latents.shape)
