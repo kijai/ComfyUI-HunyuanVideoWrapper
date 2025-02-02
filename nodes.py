@@ -4,7 +4,7 @@ import json
 import gc
 from .utils import log, print_memory
 from diffusers.video_processor import VideoProcessor
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union
 
 from .hyvideo.constants import PROMPT_TEMPLATE
 from .hyvideo.text_encoder import TextEncoder
@@ -55,6 +55,8 @@ import comfy.model_management as mm
 from comfy.utils import load_torch_file, save_torch_file
 import comfy.model_base
 import comfy.latent_formats
+from PIL import Image
+import os
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -791,6 +793,7 @@ class HyVideoCustomPromptTemplate:
         }
         return (prompt_template_dict,)
 
+
 class HyVideoTextEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -804,7 +807,7 @@ class HyVideoTextEncode:
                 "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
                 "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
                 "hyvid_cfg": ("HYVID_CFG", ),
-                "crop_prompt": ("BOOLEAN", {"default": False, "tooltip": "Enable prompt cropping based on the selected template's crop_start value"}),
+                "crop_prompt": ("BOOLEAN", {"default": True, "tooltip": "Enable prompt cropping based on the selected template's crop_start value"}),
             }
         }
 
@@ -813,11 +816,11 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None):
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", hyvid_cfg=None, image1=None, image2=None, clip_text_override=None, crop_prompt=True):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
-        device = mm.text_encoder_device()
-        offload_device = mm.text_encoder_offload_device()
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
 
         text_encoder_1 = text_encoders["text_encoder"]
         if clip_l is None:
@@ -852,10 +855,9 @@ class HyVideoTextEncode:
         else:
             prompt_template_dict = None
 
-        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None, max_context_length=None, crop_prompt=True):
+        def encode_prompt(self, prompt, negative_prompt, text_encoder, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None, max_context_length=None):
             batch_size = 1
             num_videos_per_prompt = 1
-            
 
             # Apply prompt template (if enabled) and crop prompt (if enabled)
             if prompt_template_dict is not None and "template" in prompt_template_dict:
@@ -880,7 +882,6 @@ class HyVideoTextEncode:
             prompt_embeds = prompt_outputs.hidden_state
 
             attention_mask = prompt_outputs.attention_mask
-            log.info(f"{text_encoder.text_encoder_type} prompt attention_mask shape: {attention_mask.shape}, masked tokens: {attention_mask[0].sum().item()}")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
                 bs_embed, seq_len = attention_mask.shape
@@ -892,7 +893,7 @@ class HyVideoTextEncode:
             prompt_embeds = prompt_embeds.to(dtype=text_encoder.dtype, device=device)
 
             # get unconditional embeddings for classifier free guidance
-            if do_classifier_free_guidance:
+            if do_classifier_free_guidance and negative_prompt_embeds is None:
                 uncond_tokens: List[str]
                 if negative_prompt is None:
                     uncond_tokens = [""] * batch_size
@@ -941,10 +942,6 @@ class HyVideoTextEncode:
                 negative_attention_mask,
             )
         text_encoder_1.to(device)
-        
-        # Get max_context_length from text_encoder_1
-        max_context_length = text_encoder_1.max_length
-        
         with torch.autocast(device_type=mm.get_autocast_device(device), dtype=text_encoder_1.dtype, enabled=text_encoder_1.is_fp8):
             prompt_embeds, negative_prompt_embeds, attention_mask, negative_attention_mask = encode_prompt(self,
                                                                                                             prompt,
@@ -952,15 +949,14 @@ class HyVideoTextEncode:
                                                                                                             text_encoder_1, 
                                                                                                             image_token_selection_expr=image_token_selection_expr,
                                                                                                             image1=image1,
-                                                                                                            image2=image2,
-                                                                                                            max_context_length=max_context_length)  # Pass max_context_length here)
+                                                                                                            image2=image2)
         if force_offload:
             text_encoder_1.to(offload_device)
             mm.soft_empty_cache()
 
         if text_encoder_2 is not None:
             text_encoder_2.to(device)
-            prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = encode_prompt(self, prompt, negative_prompt, text_encoder_2, clip_text_override=clip_text_override, max_context_length=max_context_length) # Pass max_context_length here)
+            prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = encode_prompt(self, prompt, negative_prompt, text_encoder_2, clip_text_override=clip_text_override)
             if force_offload:
                 text_encoder_2.to(offload_device)
                 mm.soft_empty_cache()
@@ -1002,24 +998,15 @@ class HyVideoTextEncode:
             }
         return (prompt_embeds_dict,)
 
-class HyVideoTextImageEncode(HyVideoTextEncode):
-    # Experimental Image Prompt to Video (IP2V) via VLM implementation by @Dango233
+class HyVideoTextImageEncode:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": {
-            "text_encoders": ("HYVIDTEXTENCODER",),
-            "prompt": ("STRING", {"default": "", "multiline": True} ),
-            "image_token_selection_expr": ("STRING", {"default": "::4", "multiline": False} ),
-            },
-            "optional": {
-                "force_offload": ("BOOLEAN", {"default": True}),
-                "prompt_template": (["video", "image", "custom", "disabled"], {"default": "video", "tooltip": "Use the default prompt templates for the llm text encoder"}),
-                "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
-                "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
-                "image1": ("IMAGE", {"default": None}),
-                "image2": ("IMAGE", {"default": None}),
-                "clip_text_override": ("STRING", {"default": "", "multiline": True} ),
-                "hyvid_cfg": ("HYVID_CFG", ),
+        return {
+            "required": {
+                "text_encoders": ("HYVIDTEXTENCODER",),
+                "prompt": ("STRING", {"default": "", "multiline": True}),
+                "image_token_selection": (["auto", "first", "middle", "last", "interleaved"], {"default": "auto"}),
+                "num_image_tokens": ("INT", {"default": 144, "min": 0, "max": 576, "step": 1, "tooltip": "Number of image tokens to use. Maximum 576."}),
                 "crop_prompt": (
                     "BOOLEAN",
                     {
@@ -1027,13 +1014,244 @@ class HyVideoTextImageEncode(HyVideoTextEncode):
                         "tooltip": "Enable prompt cropping based on the selected template's crop_start value",
                     },
                 ),
+                "image": ("IMAGE", {"default": None, "tooltip": "First image to process"}),
+                "use_images": ("BOOLEAN", {"default": False, "tooltip": "Enable image processing"}),
+            },
+            "optional": {
+                "image_": ("IMAGE", {"default": None, "tooltip": "Second image to process"}),
+                "force_offload": ("BOOLEAN", {"default": True}),
+                "prompt_template": (["video", "image", "custom", "disabled"], {"default": "video", "tooltip": "Use the default prompt templates for the llm text encoder"}),
+                "custom_prompt_template": ("PROMPT_TEMPLATE", {"default": PROMPT_TEMPLATE["dit-llm-encode-video"], "multiline": True}),
+                "clip_l": ("CLIP", {"tooltip": "Use comfy clip model instead, in this case the text encoder loader's clip_l should be disabled"}),
+                "hyvid_cfg": ("HYVID_CFG", ),
             }
         }
 
-    RETURN_TYPES = ("HYVIDEMBEDS", )
+    RETURN_TYPES = ("HYVIDEMBEDS",)
     RETURN_NAMES = ("hyvid_embeds",)
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "Encodes both text and optional images using the specified text encoders."
+
+    def process(
+        self,
+        text_encoders,
+        prompt,
+        image_token_selection,
+        num_image_tokens,
+        crop_prompt=True,
+        force_offload=True,
+        prompt_template="video",
+        custom_prompt_template=None,
+        clip_l=None,
+        image=None,
+        image_=None,
+        clip_text_override=None,
+        hyvid_cfg=None,
+        use_images=False,
+    ):
+        if clip_text_override is not None and len(clip_text_override) == 0:
+            clip_text_override = None
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+
+        text_encoder_1 = text_encoders["text_encoder"]
+
+        # the main text encoder should be a VLM model
+        if text_encoder_1.text_encoder_type != "vlm":
+            raise ValueError(f"The main text encoder should be a VLM for image encoding, but got {text_encoder_1.text_encoder_type}")
+
+        if clip_l is None:
+            text_encoder_2 = text_encoders["text_encoder_2"]
+        else:
+            text_encoder_2 = None
+
+        if hyvid_cfg is not None:
+            negative_prompt = hyvid_cfg["negative_prompt"]
+            do_classifier_free_guidance = True
+        else:
+            do_classifier_free_guidance = False
+            negative_prompt = None
+
+        if prompt_template != "disabled":
+            if prompt_template == "custom":
+                prompt_template_dict = custom_prompt_template
+            elif prompt_template == "video":
+                prompt_template_dict = PROMPT_TEMPLATE["dit-llm-encode-video"]
+            elif prompt_template == "image":
+                prompt_template_dict = PROMPT_TEMPLATE["dit-llm-encode"]
+            else:
+                raise ValueError(f"Invalid prompt_template: {prompt_template_dict}")
+            assert (
+                isinstance(prompt_template_dict, dict)
+                and "template" in prompt_template_dict
+            ), f"`prompt_template` must be a dictionary with a key 'template', got {prompt_template_dict}"
+            assert "{}" in str(prompt_template_dict["template"]), (
+                "`prompt_template['template']` must contain a placeholder `{}` for the input text, "
+                f"got {prompt_template_dict['template']}"
+            )
+        else:
+            prompt_template_dict = None
+
+        # Handle image token selection based on user input:
+        if image_token_selection == "auto":
+            image_token_selection_expr = "::4"  # Default: use every 4th token
+        elif image_token_selection == "first":
+            image_token_selection_expr = f":{num_image_tokens}"
+        elif image_token_selection == "middle":
+            start = (576 - num_image_tokens) // 2
+            end = start + num_image_tokens
+            image_token_selection_expr = f"{start}:{end}"
+        elif image_token_selection == "last":
+            image_token_selection_expr = f"-{num_image_tokens}:"
+        elif image_token_selection == "interleaved":
+            n = 576 // num_image_tokens
+            image_token_selection_expr = f"::{n}"
+        else:
+            raise ValueError(f"Invalid image_token_selection: {image_token_selection}")
+
+        # Call the encode_prompt function
+        text_encoder_1.to(device)
+        with torch.autocast(device_type=mm.get_autocast_device(device), dtype=text_encoder_1.dtype, enabled=text_encoder_1.is_fp8):
+            prompt_embeds, negative_prompt_embeds, attention_mask, negative_attention_mask = self.encode_prompt(
+                text_encoder_1,
+                prompt,
+                negative_prompt,
+                prompt_template_dict,
+                image_token_selection_expr,
+                image,
+                image_ if use_images else None,
+                crop_prompt,
+                do_classifier_free_guidance
+            )
+        if force_offload:
+            text_encoder_1.to(offload_device)
+            mm.soft_empty_cache()
+
+        if text_encoder_2 is not None:
+            text_encoder_2.to(device)
+            prompt_embeds_2, negative_prompt_embeds_2, attention_mask_2, negative_attention_mask_2 = self.encode_prompt(
+                text_encoder_2,
+                prompt,
+                negative_prompt,
+                None,
+                clip_text_override=clip_text_override,
+            )
+            if force_offload:
+                text_encoder_2.to(offload_device)
+                mm.soft_empty_cache()
+        elif clip_l is not None:
+            clip_l.cond_stage_model.to(device)
+            tokens = clip_l.tokenize(prompt if clip_text_override is None else clip_text_override, return_word_ids=True)
+            prompt_embeds_2 = clip_l.encode_from_tokens(tokens, return_pooled=True, return_dict=False)[1]
+            prompt_embeds_2 = prompt_embeds_2.to(device=device)
+
+            if negative_prompt is not None:
+                tokens = clip_l.tokenize(negative_prompt, return_word_ids=True)
+                negative_prompt_embeds_2 = clip_l.encode_from_tokens(tokens, return_pooled=True, return_dict=False)[1]
+                negative_prompt_embeds_2 = negative_prompt_embeds_2.to(device=device)
+            else:
+                negative_prompt_embeds_2 = None
+            attention_mask_2, negative_attention_mask_2 = None, None
+
+            if force_offload:
+                clip_l.cond_stage_model.to(offload_device)
+                mm.soft_empty_cache()
+        else:
+            prompt_embeds_2 = negative_prompt_embeds_2 = attention_mask_2 = negative_attention_mask_2 = None
+
+        prompt_embeds_dict = {
+            "prompt_embeds": prompt_embeds,
+            "negative_prompt_embeds": negative_prompt_embeds,
+            "attention_mask": attention_mask,
+            "negative_attention_mask": negative_attention_mask,
+            "prompt_embeds_2": prompt_embeds_2,
+            "negative_prompt_embeds_2": negative_prompt_embeds_2,
+            "attention_mask_2": attention_mask_2,
+            "negative_attention_mask_2": negative_attention_mask_2,
+            "cfg": torch.tensor(hyvid_cfg["cfg"]) if hyvid_cfg is not None else None,
+            "start_percent": torch.tensor(hyvid_cfg["start_percent"]) if hyvid_cfg is not None else None,
+            "end_percent": torch.tensor(hyvid_cfg["end_percent"]) if hyvid_cfg is not None else None,
+        }
+
+        return (prompt_embeds_dict,)
+    
+    def encode_prompt(self, text_encoder, prompt, negative_prompt, prompt_template_dict, image_token_selection_expr="::4", image1=None, image2=None, clip_text_override=None, max_context_length=None, crop_prompt=False, do_classifier_free_guidance=True):
+        batch_size = 1
+        num_videos_per_prompt = 1
+        device = text_encoder.device
+
+        # Apply prompt template (if enabled) and crop prompt (if enabled)
+        if prompt_template_dict is not None and "template" in prompt_template_dict:
+            if crop_prompt:
+                crop_start = prompt_template_dict.get("crop_start", 0)
+                if crop_start > 0:
+                    prompt = prompt[crop_start:]
+                    if negative_prompt:
+                        negative_prompt = negative_prompt[crop_start:]
+
+        # Process and tokenize the text prompt and images if using a VLM model
+        if text_encoder.text_encoder_type == "vlm" and (image1 is not None or image2 is not None):
+            text_inputs = text_encoder.text2tokens(
+                prompt, 
+                prompt_template=prompt_template_dict,
+                image1=image1,
+                image2=image2,
+                clip_text_override=clip_text_override
+            )
+        else:
+            text_inputs = text_encoder.text2tokens(
+                prompt, 
+                prompt_template=prompt_template_dict,
+                clip_text_override=clip_text_override
+            )
+
+        # Encode the combined text and image tokens
+        prompt_outputs = text_encoder.encode(
+            text_inputs, 
+            prompt_template=prompt_template_dict, 
+            image_token_selection_expr=image_token_selection_expr, 
+            device=device,
+            max_context_length=max_context_length
+        )
+        prompt_embeds = prompt_outputs.hidden_state
+
+        # Process attention mask if available
+        attention_mask = prompt_outputs.attention_mask
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+            bs_embed, seq_len = attention_mask.shape
+            attention_mask = attention_mask.repeat(1, num_videos_per_prompt)
+            attention_mask = attention_mask.view(bs_embed * num_videos_per_prompt, seq_len)
+
+        prompt_embeds = prompt_embeds.to(dtype=text_encoder.dtype, device=device)
+
+        # Handle negative prompt for classifier-free guidance
+        negative_prompt_embeds = None
+        negative_attention_mask = None
+        if do_classifier_free_guidance:
+            if negative_prompt is None:
+                negative_prompt = ""
+            negative_prompt_tokens = text_encoder.text2tokens(
+                negative_prompt, 
+                prompt_template=prompt_template_dict
+            )
+            negative_prompt_outputs = text_encoder.encode(
+                negative_prompt_tokens, 
+                prompt_template=prompt_template_dict, 
+                device=device, 
+                max_context_length=max_context_length
+            )
+            negative_prompt_embeds = negative_prompt_outputs.hidden_state
+
+            negative_attention_mask = negative_prompt_outputs.attention_mask
+            if negative_attention_mask is not None:
+                negative_attention_mask = negative_attention_mask.to(device)
+                _, seq_len = negative_attention_mask.shape
+                negative_attention_mask = negative_attention_mask.repeat(1, num_videos_per_prompt)
+                negative_attention_mask = negative_attention_mask.view(batch_size * num_videos_per_prompt, seq_len)
+
+        return (prompt_embeds, negative_prompt_embeds, attention_mask, negative_attention_mask)
 
 # region CFG    
 class HyVideoCFG:
@@ -1579,6 +1797,67 @@ class HyVideoLatentPreview:
 
         return (latent_images.float().cpu(), out_factors)
 
+class HyI2VPatcher:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "latents": ("LATENT",),
+                "i2v_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001, "tooltip": "Strength of the I2V conditioning."}),
+            },
+            "optional": {
+                "image_latents": ("LATENT", {"default": None, "forceInput": True, "tooltip": "One or more image latents to use for conditioning, encoded using the VAE encoder."}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = """
+A simplified I2V Patcher for HunyuanVideo that injects image latents into the first frames of the video latent, 
+using a strength parameter.
+"""
+
+    def patch(self, model, latents, i2v_strength, image_latents=None):
+        # Clone the model to avoid modifying the original
+        m = model.clone()
+
+        # Function to replace the first frame of the latents with the encoded image
+        def apply_i2v_conditioning(model, args):
+            nonlocal latents
+            # Ensure that the first frame's latent in `args[0]` (which is `x` in the `forward` method of `HYVideoDiffusionTransformer`)
+            # is replaced with the encoded `image_latent`, scaled by the `i2v_strength`.
+
+            # Ensure latents and image_latents are on the same device and have the same dtype.
+            if image_latents is not None:
+                image_latents = image_latents.to(args[0].device, dtype=args[0].dtype)
+                
+                # Determine the number of frames to replace based on the number of image latents provided.
+                num_frames_to_replace = image_latents["samples"].size(1)  # Assuming shape (B, C, T, H, W)
+
+                # Replace the frames in the latents with the image latents.
+                if num_frames_to_replace <= args[0].size(2):
+                    args[0][:, :, :num_frames_to_replace, :, :] = image_latents["samples"] * i2v_strength
+                else:
+                    logger.warning(f"Number of image latents ({num_frames_to_replace}) exceeds the number of frames in the video latent ({args[0].size(2)}). Only the first {args[0].size(2)} frames will be replaced.")
+                    args[0][:, :, :, :, :] = image_latents["samples"][:,:,:args[0].shape[2],:,:] * i2v_strength
+            else:
+                # No image provided, ensure we are generating the frames
+                if i2v_strength == 0.0:
+                    print("Strength is 0, using initial noise as latents.")
+                else:
+                    print("No image provided, but strength is not 0. Generating video from noise.")
+            
+            # Call the original forward method with the modified input and adjusted parameters
+            return model.inner_model.forward(*args, **kwargs)
+        
+        # Set the model's forward function to our patched forward function
+        m.set_model_unet_function_wrapper(apply_i2v_conditioning)
+
+        # Return the patched model
+        return (m,)
+
 NODE_CLASS_MAPPINGS = {
     "HyVideoSampler": HyVideoSampler,
     "HyVideoDecode": HyVideoDecode,
@@ -1601,6 +1880,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoContextOptions": HyVideoContextOptions,
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
     "HyVideoTeaCache": HyVideoTeaCache,
+    "HyI2VPatcher": HyI2VPatcher,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1624,4 +1904,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoContextOptions": "HunyuanVideo Context Options",
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",
     "HyVideoTeaCache": "HunyuanVideo TeaCache",
+    "HyI2VPatcher": "HyI2VPatcher",
     }
