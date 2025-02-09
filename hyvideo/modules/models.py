@@ -230,6 +230,8 @@ class MMDoubleStreamBlock(nn.Module):
 
         # Apply RoPE if needed.
         if freqs_cis is not None:
+            img_k = img_k.to(img_q.device)
+            freqs_cis = (freqs_cis[0].to(img_q.device), freqs_cis[1].to(img_q.device))
             img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
             
         # Prepare txt for attention.
@@ -400,6 +402,8 @@ class MMSingleStreamBlock(nn.Module):
         if freqs_cis is not None:
             img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
             img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
+            img_k = img_k.to(img_q.device)
+            freqs_cis = (freqs_cis[0].to(img_q.device), freqs_cis[1].to(img_q.device))
             img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
             # assert (
             #     img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
