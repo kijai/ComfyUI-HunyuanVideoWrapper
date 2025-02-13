@@ -26,8 +26,8 @@ packages = [
     "hyvideo.diffusion.schedulers",
     "hyvideo.modules",
     "hyvideo.textencoder",
-    "hyvideo.utils"
-    "hyvideo.vae"
+    "hyvideo.utils",
+    "hyvideo.vae",
 ]
 
 [tool.setuptools.package-dir]
