@@ -45,3 +45,4 @@ packages = [
 "*" = ["**/*.js", "**/*.json"]
 
 [project.entry-points."comfyui.custom_nodes"]
+"comfyui-hunyuanvideowrapper"="comfyui-hunyuanvideowrapper.nodes"

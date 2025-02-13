@@ -6,8 +6,8 @@ from .utils import log, print_memory
 
 from diffusers.utils.torch_utils import randn_tensor
 import comfy.model_management as mm
-from .hyvideo.diffusion.pipelines.pipeline_hunyuan_video import get_rotary_pos_embed
-from .enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
+from hyvideo.diffusion.pipelines.pipeline_hunyuan_video import get_rotary_pos_embed
+from hyvideo.enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 

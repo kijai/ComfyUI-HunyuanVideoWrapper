@@ -6,14 +6,14 @@ from .utils import log, print_memory
 from diffusers.video_processor import VideoProcessor
 from typing import List, Dict, Any, Tuple
 
-from .hyvideo.constants import PROMPT_TEMPLATE
-from .hyvideo.text_encoder import TextEncoder
-from .hyvideo.utils.data_utils import align_to
-from .hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
+from hyvideo.constants import PROMPT_TEMPLATE
+from hyvideo.text_encoder import TextEncoder
+from hyvideo.utils.data_utils import align_to
+from hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
 
-from .hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
-from .hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
-from .hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
+from hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
+from hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
+from hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
 # from diffusers.schedulers import ( 
 #     DDIMScheduler, 
