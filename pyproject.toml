@@ -25,7 +25,7 @@ packages = [
     "hyvideo.diffusion.pipelines",
     "hyvideo.diffusion.schedulers",
     "hyvideo.modules",
-    "hyvideo.textencoder",
+    "hyvideo.text_encoder",
     "hyvideo.utils",
     "hyvideo.vae",
 ]
@@ -37,7 +37,7 @@ packages = [
 "comfyui-hunyuanvideowrapper.diffusion.pipelines" = "hyvideo/diffusion/pipelines"
 "comfyui-hunyuanvideowrapper.diffusion.schedulers" = "hyvideo/diffusion/schedulers"
 "comfyui-hunyuanvideowrapper.modules" = "hyvideo/modules"
-"comfyui-hunyuanvideowrapper.textencoder" = "hyvideo/textencoder"
+"comfyui-hunyuanvideowrapper.text_encoder" = "hyvideo/text_encoder"
 "comfyui-hunyuanvideowrapper.utils" = "hyvideo/utils"
 "comfyui-hunyuanvideowrapper.vae" = "hyvideo/vae"
 
