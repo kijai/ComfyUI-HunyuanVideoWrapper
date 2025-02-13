@@ -13,7 +13,7 @@ from .hyvideo.diffusion.schedulers import FlowMatchDiscreteScheduler
 
 from .hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 from .hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
-from. hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
+from .hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
 # from diffusers.schedulers import ( 
 #     DDIMScheduler, 

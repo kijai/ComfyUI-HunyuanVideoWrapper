@@ -14,5 +14,36 @@ PublisherId = "kijai"
 DisplayName = "ComfyUI-HunyuanVideoWrapper"
 Icon = ""
 
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools]
-py-modules = ["hyvideo"]
+packages = [
+    "hyvideo",
+    "hyvideo.diffusion",
+    "hyvideo.diffusion.pipelines",
+    "hyvideo.diffusion.schedulers",
+    "hyvideo.modules",
+    "hyvideo.textencoder",
+    "hyvideo.utils"
+    "hyvideo.vae"
+]
+
+[tool.setuptools.package-dir]
+"comfyui-hunyuanvideowrapper" = "."
+"comfyui-hunyuanvideowrapper.hyvideo" = "hyvideo"
+"comfyui-hunyuanvideowrapper.diffusion" = "hyvideo/diffusion"
+"comfyui-hunyuanvideowrapper.diffusion.pipelines" = "hyvideo/diffusion/pipelines"
+"comfyui-hunyuanvideowrapper.diffusion.schedulers" = "hyvideo/diffusion/schedulers"
+"comfyui-hunyuanvideowrapper.modules" = "hyvideo/modules"
+"comfyui-hunyuanvideowrapper.textencoder" = "hyvideo/textencoder"
+"comfyui-hunyuanvideowrapper.utils" = "hyvideo/utils"
+"comfyui-hunyuanvideowrapper.vae" = "hyvideo/vae"
+
+[tool.setuptools.package-data]
+"*" = ["**/*.js", "**/*.json"]
+
+[project.entry-points."comfyui.custom_nodes"]
+comfyui-hunyuanvideowrapper = "comfyui-hunyuanvideowrapper.__init__"
+comfyui-hunyuanvideowrapper_web_directory = "comfyui-hunyuanvideowrapper"
