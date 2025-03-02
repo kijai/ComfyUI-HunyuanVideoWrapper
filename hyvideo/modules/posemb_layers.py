@@ -74,6 +74,7 @@ def apply_rotary_emb(
     freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
     upcast: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    device = xq.device  # Get the device of xq
     """
     Apply rotary embeddings to input tensors using the given frequency tensor.
 
@@ -93,7 +94,7 @@ def apply_rotary_emb(
     """
    
     shape = [d if i == 1 or i == xq.ndim - 1 else 1 for i, d in enumerate(xq.shape)]
-    cos, sin = freqs_cis[0].view(*shape), freqs_cis[1].view(*shape)
+    cos, sin = freqs_cis[0].to(device).view(*shape), freqs_cis[1].to(device).view(*shape)
 
     if upcast:
         xq_out = apply_rotary(xq.float(), cos, sin).to(xq.dtype)
