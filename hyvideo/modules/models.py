@@ -21,6 +21,9 @@ from ...enhance_a_video.enhance import get_feta_scores
 from ...enhance_a_video.globals import is_enhance_enabled_single, is_enhance_enabled_double, set_num_frames
 from .norm_layers import RMSNorm
 
+from .cache_functions import cal_type
+from .taylor_utils import derivative_approximation, taylor_formula, taylor_cache_init
+
 from contextlib import contextmanager
 
 @contextmanager
@@ -200,6 +203,8 @@ class MMDoubleStreamBlock(nn.Module):
         token_replace_vec: torch.Tensor = None,
         first_frame_token_num: int = None,
         condition_type: str = None,
+        cache_dic: Optional[Dict] = None,
+        current: Optional[Dict] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if condition_type == "token_replace":
             img_mod1, token_replace_img_mod1 = self.img_mod(vec, condition_type=condition_type, \
@@ -236,108 +241,245 @@ class MMDoubleStreamBlock(nn.Module):
         ) = self.txt_mod(vec).chunk(6, dim=-1)
 
         # Prepare image for attention.
-        img_modulated = self.img_norm1(img)
-        if condition_type == "token_replace":
-            img_modulated = modulate(
-                img_modulated, shift=img_mod1_shift, scale=img_mod1_scale, condition_type=condition_type,
-                tr_shift=tr_img_mod1_shift, tr_scale=tr_img_mod1_scale,
-                first_frame_token_num=first_frame_token_num
-            )
-        else:
-            img_modulated = modulate(
-                img_modulated, shift=img_mod1_shift, scale=img_mod1_scale
-            )
-        img_qkv = self.img_attn_qkv(img_modulated)
-        img_q, img_k, img_v = rearrange(
-            img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num
-        )
-        # Apply QK-Norm if needed
-        img_q = self.img_attn_q_norm(img_q).to(img_v)
-        img_k = self.img_attn_k_norm(img_k).to(img_v)
-
-        # Apply RoPE if needed.
-        if freqs_cis is not None:
-            img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
-            
-        # Prepare txt for attention.
-        txt_modulated = self.txt_norm1(txt)
-        txt_modulated = modulate(
-            txt_modulated, shift=txt_mod1_shift, scale=txt_mod1_scale
-        )
-        txt_qkv = self.txt_attn_qkv(txt_modulated)
-        txt_q, txt_k, txt_v = rearrange(
-            txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num
-        )
-                
-        # Apply QK-Norm if needed.
-        txt_q = self.txt_attn_q_norm(txt_q).to(txt_v)
-        txt_k = self.txt_attn_k_norm(txt_k).to(txt_v)
-
-        if is_enhance_enabled_double():
-            feta_scores = get_feta_scores(img_q, img_k)
-
-        # Run actual attention.
-        q = torch.cat((img_q, txt_q), dim=1)
-        k = torch.cat((img_k, txt_k), dim=1)
-        v = torch.cat((img_v, txt_v), dim=1)
-
-        attn = attention(
-            q,
-            k,
-            v,
-            heads = self.heads_num,
-            mode=self.attention_mode,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            batch_size=img_k.shape[0],
-            attn_mask=attn_mask
-        )
-
-        img_attn, txt_attn = attn[:, : img.shape[1]], attn[:, img.shape[1] :]
-        if is_enhance_enabled_double():
-            img_attn *= feta_scores
-
-        # Calculate the img bloks.
-        if condition_type == "token_replace":
-            img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate, condition_type=condition_type,
-                                   tr_gate=tr_img_mod1_gate, first_frame_token_num=first_frame_token_num)
-            img = img + apply_gate(
-                self.img_mlp(
-                    modulate(
-                        self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale, condition_type=condition_type,
-                        tr_shift=tr_img_mod2_shift, tr_scale=tr_img_mod2_scale, first_frame_token_num=first_frame_token_num
-                    )
-                ),
-                gate=img_mod2_gate, condition_type=condition_type,
-                tr_gate=tr_img_mod2_gate, first_frame_token_num=first_frame_token_num
-            )
-        else:
-            img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate)
-            img = img + apply_gate(
-                self.img_mlp(
-                    modulate(
-                        self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale
-                    )
-                ),
-                gate=img_mod2_gate,
-            )
-
-        # Calculate the txt bloks.
-        txt = txt + apply_gate(self.txt_attn_proj(txt_attn), gate=txt_mod1_gate)
-        txt = txt + apply_gate(
-            self.txt_mlp(
-                modulate(
-                    self.txt_norm2(txt), shift=txt_mod2_shift, scale=txt_mod2_scale
+        if cache_dic is None:
+            img_modulated = self.img_norm1(img)
+            if condition_type == "token_replace":
+                img_modulated = modulate(
+                    img_modulated, shift=img_mod1_shift, scale=img_mod1_scale, condition_type=condition_type,
+                    tr_shift=tr_img_mod1_shift, tr_scale=tr_img_mod1_scale,
+                    first_frame_token_num=first_frame_token_num
                 )
-            ),
-            gate=txt_mod2_gate,
-        )
+            else:
+                img_modulated = modulate(
+                    img_modulated, shift=img_mod1_shift, scale=img_mod1_scale
+                )
+            img_qkv = self.img_attn_qkv(img_modulated)
+            img_q, img_k, img_v = rearrange(
+                img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num
+            )
+            # Apply QK-Norm if needed
+            img_q = self.img_attn_q_norm(img_q).to(img_v)
+            img_k = self.img_attn_k_norm(img_k).to(img_v)
 
-        return img, txt
+            # Apply RoPE if needed.
+            if freqs_cis is not None:
+                img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
+                
+            # Prepare txt for attention.
+            txt_modulated = self.txt_norm1(txt)
+            txt_modulated = modulate(
+                txt_modulated, shift=txt_mod1_shift, scale=txt_mod1_scale
+            )
+            txt_qkv = self.txt_attn_qkv(txt_modulated)
+            txt_q, txt_k, txt_v = rearrange(
+                txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num
+            )
+                    
+            # Apply QK-Norm if needed.
+            txt_q = self.txt_attn_q_norm(txt_q).to(txt_v)
+            txt_k = self.txt_attn_k_norm(txt_k).to(txt_v)
 
+            if is_enhance_enabled_double():
+                feta_scores = get_feta_scores(img_q, img_k)
 
+            # Run actual attention.
+            q = torch.cat((img_q, txt_q), dim=1)
+            k = torch.cat((img_k, txt_k), dim=1)
+            v = torch.cat((img_v, txt_v), dim=1)
+
+            attn = attention(
+                q,
+                k,
+                v,
+                heads = self.heads_num,
+                mode=self.attention_mode,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                batch_size=img_k.shape[0],
+                attn_mask=attn_mask
+            )
+
+            img_attn, txt_attn = attn[:, : img.shape[1]], attn[:, img.shape[1] :]
+            
+            if is_enhance_enabled_double():
+                img_attn *= feta_scores
+
+            # Calculate the img bloks.
+            if condition_type == "token_replace":
+                img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate, condition_type=condition_type,
+                                    tr_gate=tr_img_mod1_gate, first_frame_token_num=first_frame_token_num)
+                img = img + apply_gate(
+                    self.img_mlp(
+                        modulate(
+                            self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale, condition_type=condition_type,
+                            tr_shift=tr_img_mod2_shift, tr_scale=tr_img_mod2_scale, first_frame_token_num=first_frame_token_num
+                        )
+                    ),
+                    gate=img_mod2_gate, condition_type=condition_type,
+                    tr_gate=tr_img_mod2_gate, first_frame_token_num=first_frame_token_num
+                )
+            else:
+                img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate)
+                img = img + apply_gate(
+                    self.img_mlp(
+                        modulate(
+                            self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale
+                        )
+                    ),
+                    gate=img_mod2_gate,
+                )
+
+            # Calculate the txt bloks.
+            txt = txt + apply_gate(self.txt_attn_proj(txt_attn), gate=txt_mod1_gate)
+            txt = txt + apply_gate(
+                self.txt_mlp(
+                    modulate(
+                        self.txt_norm2(txt), shift=txt_mod2_shift, scale=txt_mod2_scale
+                    )
+                ),
+                gate=txt_mod2_gate,
+            )
+
+            return img, txt
+        else:
+            if current['type'] == 'full':
+                current['module'] = 'attn'
+
+                img_modulated = self.img_norm1(img)
+                if condition_type == "token_replace":
+                    img_modulated = modulate(
+                        img_modulated, shift=img_mod1_shift, scale=img_mod1_scale, condition_type=condition_type,
+                        tr_shift=tr_img_mod1_shift, tr_scale=tr_img_mod1_scale,
+                        first_frame_token_num=first_frame_token_num
+                    )
+                else:
+                    img_modulated = modulate(
+                        img_modulated, shift=img_mod1_shift, scale=img_mod1_scale
+                    )
+                img_qkv = self.img_attn_qkv(img_modulated)
+                img_q, img_k, img_v = rearrange(
+                    img_qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num
+                )
+                # Apply QK-Norm if needed
+                img_q = self.img_attn_q_norm(img_q).to(img_v)
+                img_k = self.img_attn_k_norm(img_k).to(img_v)
+
+                # Apply RoPE if needed.
+                if freqs_cis is not None:
+                    img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
+                    
+                # Prepare txt for attention.
+                txt_modulated = self.txt_norm1(txt)
+                txt_modulated = modulate(
+                    txt_modulated, shift=txt_mod1_shift, scale=txt_mod1_scale
+                )
+                txt_qkv = self.txt_attn_qkv(txt_modulated)
+                txt_q, txt_k, txt_v = rearrange(
+                    txt_qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num
+                )
+                        
+                # Apply QK-Norm if needed.
+                txt_q = self.txt_attn_q_norm(txt_q).to(txt_v)
+                txt_k = self.txt_attn_k_norm(txt_k).to(txt_v)
+
+                if is_enhance_enabled_double():
+                    feta_scores = get_feta_scores(img_q, img_k)
+
+                # Run actual attention.
+                q = torch.cat((img_q, txt_q), dim=1)
+                k = torch.cat((img_k, txt_k), dim=1)
+                v = torch.cat((img_v, txt_v), dim=1)
+
+                attn = attention(
+                    q,
+                    k,
+                    v,
+                    heads = self.heads_num,
+                    mode=self.attention_mode,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    batch_size=img_k.shape[0],
+                    attn_mask=attn_mask
+                )
+
+                img_attn, txt_attn = attn[:, : img.shape[1]], attn[:, img.shape[1] :]
+                
+                if is_enhance_enabled_double():
+                    img_attn *= feta_scores
+
+                # Calculate the img blocks
+                current['module'] = 'img_attn'
+                taylor_cache_init(cache_dic, current)
+
+                if condition_type == "token_replace":
+                    img = img + apply_gate(self.img_attn_proj(img_attn), gate=img_mod1_gate, condition_type=condition_type,
+                                        tr_gate=tr_img_mod1_gate, first_frame_token_num=first_frame_token_num)
+                    img = img + apply_gate(
+                        self.img_mlp(
+                            modulate(
+                                self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale, condition_type=condition_type,
+                                tr_shift=tr_img_mod2_shift, tr_scale=tr_img_mod2_scale, first_frame_token_num=first_frame_token_num
+                            )
+                        ),
+                        gate=img_mod2_gate, condition_type=condition_type,
+                        tr_gate=tr_img_mod2_gate, first_frame_token_num=first_frame_token_num
+                    )
+                else:
+                    #img attn
+                    img_attn_out = self.img_attn_proj(img_attn)
+                    img = img + apply_gate(img_attn_out, gate=img_mod1_gate)
+                    derivative_approximation(cache_dic, current, img_attn_out)
+
+                    #img mlp
+                    current['module'] = 'img_mlp'
+                    taylor_cache_init(cache_dic, current)
+
+                    img_mlp_out = self.img_mlp(
+                        modulate(
+                            self.img_norm2(img), shift=img_mod2_shift, scale=img_mod2_scale
+                        )
+                    )
+                    img = img + apply_gate(img_mlp_out, gate=img_mod2_gate)
+                    derivative_approximation(cache_dic, current, img_mlp_out)
+
+                # Calculate the txt blocks
+                current['module'] = 'txt_attn'
+                taylor_cache_init(cache_dic, current)
+
+                txt_attn_out = self.txt_attn_proj(txt_attn)
+                txt = txt + apply_gate(txt_attn_out, gate=txt_mod1_gate)
+                derivative_approximation(cache_dic, current, txt_attn_out)
+
+                current['module'] = 'txt_mlp'
+                taylor_cache_init(cache_dic, current)
+
+                txt_mlp_out = self.txt_mlp(
+                    modulate(
+                        self.txt_norm2(txt), shift=txt_mod2_shift, scale=txt_mod2_scale
+                    )
+                )
+                txt = txt + apply_gate(txt_mlp_out, gate=txt_mod2_gate)
+                derivative_approximation(cache_dic, current, txt_mlp_out)
+            elif current['type'] == 'taylor_cache':
+                current['module'] = 'img_attn'
+                img = img + apply_gate(taylor_formula(cache_dic, current), gate=img_mod1_gate)
+
+                current['module'] = 'img_mlp'
+                img = img + apply_gate(taylor_formula(cache_dic, current), gate=img_mod2_gate)
+        
+                current['module'] = 'txt_attn'
+                txt = txt + apply_gate(taylor_formula(cache_dic, current), gate=txt_mod1_gate)
+
+                current['module'] = 'txt_mlp'
+                txt = txt + apply_gate(taylor_formula(cache_dic, current),gate=txt_mod2_gate)
+            return img, txt
+            
+
+#region single block
 class MMSingleStreamBlock(nn.Module):
     """
     A DiT block with parallel linear layers as described in
@@ -426,6 +568,8 @@ class MMSingleStreamBlock(nn.Module):
         token_replace_vec: torch.Tensor = None,
         first_frame_token_num: int = None,
         condition_type: str = None,
+        cache_dic: Optional[Dict] = None,
+        current: Optional[Dict] = None,
         stg_mode: Optional[str] = None,
         
     ) -> torch.Tensor:
@@ -441,41 +585,81 @@ class MMSingleStreamBlock(nn.Module):
              tr_mod_gate) = tr_mod.chunk(3, dim=-1)
         else:
             mod_shift, mod_scale, mod_gate = self.modulation(vec).chunk(3, dim=-1)
-        if condition_type == "token_replace":
-            x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale, condition_type=condition_type,
-                             tr_shift=tr_mod_shift, tr_scale=tr_mod_scale, first_frame_token_num=first_frame_token_num)
-        else:
-            x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale)
-        qkv, mlp = torch.split(
-            self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
-        )
+        if cache_dic is None:
+            if condition_type == "token_replace":
+                x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale, condition_type=condition_type,
+                                tr_shift=tr_mod_shift, tr_scale=tr_mod_scale, first_frame_token_num=first_frame_token_num)
+            else:
+                x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale)
 
-        q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num)
+            qkv, mlp = torch.split(
+                self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
+            )
 
-        # Apply QK-Norm if needed.
-        q = self.q_norm(q).to(v)
-        k = self.k_norm(k).to(v)
+            q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num)
 
-        # Apply RoPE if needed.
-        if freqs_cis is not None:
-            img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
-            img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
-            img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
-            # assert (
-            #     img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
-            # ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
-            q = torch.cat((img_q, txt_q), dim=1)
-            k = torch.cat((img_k, txt_k), dim=1)
+            # Apply QK-Norm if needed.
+            q = self.q_norm(q).to(v)
+            k = self.k_norm(k).to(v)
 
-        if is_enhance_enabled_single():
-            feta_scores = get_feta_scores(img_q, img_k)
+            # Apply RoPE if needed.
+            if freqs_cis is not None:
+                img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
+                img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
+                img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
+                # assert (
+                #     img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
+                # ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
+                q = torch.cat((img_q, txt_q), dim=1)
+                k = torch.cat((img_k, txt_k), dim=1)
 
-        # Compute attention.
-        #assert (
-        #    cu_seqlens_q.shape[0] == 2 * x.shape[0] + 1
-        #), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, x.shape[0]:{x.shape[0]}"
-        if stg_mode is not None:
-            if stg_mode == "STG-A":
+            if is_enhance_enabled_single():
+                feta_scores = get_feta_scores(img_q, img_k)
+
+            # Compute attention.
+            #assert (
+            #    cu_seqlens_q.shape[0] == 2 * x.shape[0] + 1
+            #), f"cu_seqlens_q.shape:{cu_seqlens_q.shape}, x.shape[0]:{x.shape[0]}"
+            if stg_mode is not None:
+                if stg_mode == "STG-A":
+                    attn = attention(
+                        q,
+                        k,
+                        v,
+                        heads = self.heads_num,
+                        mode=self.attention_mode,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_kv=cu_seqlens_kv,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
+                        batch_size=x.shape[0],
+                        do_stg=True,
+                        txt_len=txt_len,
+                        attn_mask=attn_mask
+                    )
+                    output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+                    return x + apply_gate(output, gate=mod_gate)
+                elif stg_mode == "STG-R":
+                    attn = attention(
+                        q,
+                        k,
+                        v,
+                        heads = self.heads_num,
+                        mode=self.attention_mode,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_kv=cu_seqlens_kv,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
+                        batch_size=x.shape[0],
+                        attn_mask=attn_mask
+                    )
+                    # Compute activation in mlp stream, cat again and run second linear layer.
+                    output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+                    output = apply_gate(output, gate=mod_gate)
+                    batch_size = output.shape[0]
+                    output[:batch_size-1, :, :] = 0
+                    return x + output
+            else:
                 attn = attention(
                     q,
                     k,
@@ -487,52 +671,90 @@ class MMSingleStreamBlock(nn.Module):
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                     batch_size=x.shape[0],
-                    do_stg=True,
-                    txt_len=txt_len,
                     attn_mask=attn_mask
                 )
-                output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-                return x + apply_gate(output, gate=mod_gate)
-            elif stg_mode == "STG-R":
-                attn = attention(
-                    q,
-                    k,
-                    v,
-                    heads = self.heads_num,
-                    mode=self.attention_mode,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_kv=cu_seqlens_kv,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=max_seqlen_kv,
-                    batch_size=x.shape[0],
-                    attn_mask=attn_mask
-                )
+                if is_enhance_enabled_single():
+                    attn *= feta_scores
+                    #attn[:, :-txt_len, :] *= feta_scores
+            
                 # Compute activation in mlp stream, cat again and run second linear layer.
                 output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-                output = apply_gate(output, gate=mod_gate)
-                batch_size = output.shape[0]
-                output[:batch_size-1, :, :] = 0
-                return x + output
+                if condition_type == "token_replace":
+                    output = x + apply_gate(output, gate=mod_gate, condition_type=condition_type,
+                                            tr_gate=tr_mod_gate, first_frame_token_num=first_frame_token_num)
+                    return output
+                else:
+                    return x + apply_gate(output, gate=mod_gate)
         else:
-            attn = attention(
-                q,
-                k,
-                v,
-                heads = self.heads_num,
-                mode=self.attention_mode,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                batch_size=x.shape[0],
-                attn_mask=attn_mask
-            )
-            if is_enhance_enabled_single():
-                attn *= feta_scores
-                #attn[:, :-txt_len, :] *= feta_scores
-        
-            # Compute activation in mlp stream, cat again and run second linear layer.
-            output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+            if current['type'] == 'full':
+
+                #current['module'] = 'mlp'
+                #taylor_cache_init(cache_dic, current)
+
+                if condition_type == "token_replace":
+                    x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale, condition_type=condition_type,
+                                    tr_shift=tr_mod_shift, tr_scale=tr_mod_scale, first_frame_token_num=first_frame_token_num)
+                else:
+                    x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale)
+
+                qkv, mlp = torch.split(
+                    self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
+                )
+
+                current['module'] = 'attn'
+                taylor_cache_init(cache_dic, current)
+                
+                q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.heads_num)
+
+                # Apply QK-Norm if needed.
+                q = self.q_norm(q).to(v)
+                k = self.k_norm(k).to(v)
+
+                # Apply RoPE if needed.
+                if freqs_cis is not None:
+                    img_q, txt_q = q[:, :-txt_len, :, :], q[:, -txt_len:, :, :]
+                    img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
+                    img_q, img_k = apply_rotary_emb(img_q, img_k, freqs_cis, upcast=upcast_rope)
+                    # assert (
+                    #     img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
+                    # ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
+                    q = torch.cat((img_q, txt_q), dim=1)
+                    k = torch.cat((img_k, txt_k), dim=1)
+
+                if is_enhance_enabled_single():
+                    feta_scores = get_feta_scores(img_q, img_k)
+
+                # Compute attention.
+                
+                attn = attention(
+                    q,
+                    k,
+                    v,
+                    heads=self.heads_num,
+                    mode=self.attention_mode,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    batch_size=x.shape[0],
+                    attn_mask=attn_mask
+                )
+                if is_enhance_enabled_single():
+                    attn *= feta_scores
+                    #attn[:, :-txt_len, :] *= feta_scores
+                derivative_approximation(cache_dic, current, attn)
+
+                current['module'] = 'total'
+                taylor_cache_init(cache_dic, current)
+            
+                # Compute activation in mlp stream, cat again and run second linear layer.
+                output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+                derivative_approximation(cache_dic, current, output)
+
+            elif current['type'] == 'taylor_cache':
+                current['module'] = 'total'
+                output = taylor_formula(cache_dic, current)
+
             if condition_type == "token_replace":
                 output = x + apply_gate(output, gate=mod_gate, condition_type=condition_type,
                                         tr_gate=tr_mod_gate, first_frame_token_num=first_frame_token_num)
@@ -950,26 +1172,32 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
         stg_mode: str = None,
         stg_block_idx: int = -1,
         return_dict: bool = True,
+        tseercache_dict = None,
+        tseer_current = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         
-        def _process_double_blocks(img, txt, vec, block_args):
+        def _process_double_blocks(img, txt, vec, block_args, tseercache_dict=None, tseer_current=None):
             for b, block in enumerate(self.double_blocks):
                 if b <= self.double_blocks_to_swap and self.double_blocks_to_swap >= 0:
                     block.to(self.main_device)
-                    
-                img, txt = block(img, txt, vec, *block_args)
+
+                if tseer_current is not None:
+                    tseer_current['layer'] = b
+                img, txt = block(img, txt, vec, *block_args, tseercache_dict, tseer_current)
                 
                 if b <= self.double_blocks_to_swap and self.double_blocks_to_swap >= 0:
                     block.to(self.offload_device, non_blocking=True)
             return img, txt
 
-        def _process_single_blocks(x, vec, txt_seq_len, block_args, stg_mode=None, stg_block_idx=None):
+        def _process_single_blocks(x, vec, txt_seq_len, block_args, tseercache_dict=None, tseer_current=None, stg_mode=None, stg_block_idx=None):
             for b, block in enumerate(self.single_blocks):
                 if b <= self.single_blocks_to_swap and self.single_blocks_to_swap >= 0:
                     block.to(self.main_device)
                     
                 curr_stg_mode = stg_mode if b == stg_block_idx else None
-                x = block(x, vec, txt_seq_len, *block_args, curr_stg_mode)
+                if tseer_current is not None:
+                    tseer_current['layer'] = b
+                x = block(x, vec, txt_seq_len, *block_args, tseercache_dict, tseer_current, curr_stg_mode)
                 
                 if b <= self.single_blocks_to_swap and self.single_blocks_to_swap >= 0:
                     block.to(self.offload_device, non_blocking=True)
@@ -1125,11 +1353,24 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 img = x[:, :img_seq_len, ...]
                 self.previous_residual = (img - ori_img).to(self.teacache_device)
         else:
-            # Pass through DiT blocks
-            img, txt = _process_double_blocks(img, txt, vec, block_args)
-            # Merge txt and img to pass through single stream blocks.
-            x = torch.cat((img, txt), 1)
-            x = _process_single_blocks(x, vec, txt.shape[1], block_args, stg_mode, stg_block_idx)
+            # TaylorSeer
+            if tseercache_dict is not None:
+                cal_type(tseercache_dict, tseer_current)
+                tseer_current['compute'] = not (tseer_current['type'] == 'aggressive')
+                if tseer_current['compute']:
+                    tseer_current['stream'] = 'double_stream'
+                    img, txt = _process_double_blocks(img, txt, vec, block_args, tseercache_dict, tseer_current)
+                    x = torch.cat((img, txt), 1)
+                    tseer_current['stream'] = 'single_stream'
+                    x = _process_single_blocks(x, vec, txt.shape[1], block_args, tseercache_dict=tseercache_dict, tseer_current=tseer_current, 
+                                               stg_mode=stg_mode, stg_block_idx=stg_block_idx)
+                else:
+                    x = tseercache_dict['aggressive_feature']
+            else:
+                img, txt = _process_double_blocks(img, txt, vec, block_args)
+                x = torch.cat((img, txt), 1)
+                x = _process_single_blocks(x, vec, txt.shape[1], block_args, stg_mode=stg_mode, stg_block_idx=stg_block_idx)
+            
             img = x[:, :img_seq_len, ...]
 
         # ---------------------------- Final layer ------------------------------

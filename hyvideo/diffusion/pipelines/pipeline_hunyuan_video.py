@@ -454,6 +454,7 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         image_cond_latents: Optional[torch.Tensor] = None,
         riflex_freq_index: Optional[int] = None,
         i2v_stability=True,
+        taylorseer: Optional[dict] = None,
         **kwargs,
     ):
         r"""
@@ -689,9 +690,17 @@ class HunyuanVideoPipeline(DiffusionPipeline):
         callback = prepare_callback(self.comfy_model, num_inference_steps)
 
         #print(self.scheduler.sigmas)
+
+        tseercache_dict, tseer_current = None, None
+        if taylorseer:
+            print(taylorseer)
+            from ...modules.cache_functions import cache_init
+            tseercache_dict, tseer_current = cache_init(self._num_timesteps, cache_device=taylorseer["cache_device"], compute_device=taylorseer["compute_device"])
+            tseercache_dict["max_order"] = taylorseer["max_order"]
+            tseercache_dict["fresh_threshold"] = taylorseer["fresh_threshold"]
         
         logger.info(f"Sampling {video_length} frames in {latents.shape[2]} latents at {width}x{height} with {len(timesteps)} inference steps")
-    
+
         comfy_pbar = ProgressBar(len(timesteps))
         with self.progress_bar(total=len(timesteps)) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -709,6 +718,10 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                 stg_enabled = False
 
                 current_step_percentage = i / len(timesteps)
+
+                if taylorseer:
+                    tseer_current['step'] = i
+
                 if self.do_spatio_temporal_guidance:
                     if stg_start_percent <= current_step_percentage <= stg_end_percent:
                         stg_enabled = True
@@ -851,6 +864,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 stg_block_idx=stg_block_idx,
                                 stg_mode=stg_mode,
                                 return_dict=True,
+                                tseercache_dict = tseercache_dict, #taylorseer
+                                tseer_current = tseer_current, #taylorseer
                             )["x"]
                         else:
                             uncond = self.transformer(
@@ -865,6 +880,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 stg_block_idx=stg_block_idx,
                                 stg_mode=stg_mode,
                                 return_dict=True,
+                                tseercache_dict = tseercache_dict, #taylorseer
+                                tseer_current = tseer_current, #taylorseer
                             )["x"]
                             cond = self.transformer(
                                 latent_model_input[1].unsqueeze(0),
@@ -878,6 +895,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
                                 stg_block_idx=stg_block_idx,
                                 stg_mode=stg_mode,
                                 return_dict=True,
+                                tseercache_dict = tseercache_dict, #taylorseer
+                                tseer_current = tseer_current, #taylorseer
                             )["x"]
 
                         # perform guidance

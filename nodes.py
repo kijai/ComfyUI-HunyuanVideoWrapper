@@ -450,6 +450,7 @@ class HyVideoModelLoader:
             #compile
             if compile_args is not None:
                 torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
+                torch._dynamo.config.recompile_limit = compile_args["dynamo_recompile_limit"]
                 if compile_args["compile_single_blocks"]:
                     for i, block in enumerate(patcher.model.diffusion_model.single_blocks):
                         patcher.model.diffusion_model.single_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
@@ -628,8 +629,10 @@ class HyVideoTorchCompileSettings:
                 "compile_txt_in": ("BOOLEAN", {"default": False, "tooltip": "Compile txt_in layers"}),
                 "compile_vector_in": ("BOOLEAN", {"default": False, "tooltip": "Compile vector_in layers"}),
                 "compile_final_layer": ("BOOLEAN", {"default": False, "tooltip": "Compile final layer"}),
-
             },
+            "optional": {
+                "dynamo_recompile_limit": ("INT", {"default": 64, "min": 0, "max": 1024, "step": 1, "tooltip": "torch._dynamo.config.recompile_limit"}),
+            }
         }
     RETURN_TYPES = ("COMPILEARGS",)
     RETURN_NAMES = ("torch_compile_args",)
@@ -637,7 +640,7 @@ class HyVideoTorchCompileSettings:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "torch.compile settings, when connected to the model loader, torch.compile of the selected layers is attempted. Requires Triton and torch 2.5.0 is recommended"
 
-    def loadmodel(self, backend, fullgraph, mode, dynamic, dynamo_cache_size_limit, compile_single_blocks, compile_double_blocks, compile_txt_in, compile_vector_in, compile_final_layer):
+    def loadmodel(self, backend, fullgraph, mode, dynamic, dynamo_cache_size_limit, compile_single_blocks, compile_double_blocks, compile_txt_in, compile_vector_in, compile_final_layer, dynamo_recompile_limit=64):
 
         compile_args = {
             "backend": backend,
@@ -645,6 +648,7 @@ class HyVideoTorchCompileSettings:
             "mode": mode,
             "dynamic": dynamic,
             "dynamo_cache_size_limit": dynamo_cache_size_limit,
+            "dynamo_recompile_limit": dynamo_recompile_limit,
             "compile_single_blocks": compile_single_blocks,
             "compile_double_blocks": compile_double_blocks,
             "compile_txt_in": compile_txt_in,
@@ -1266,6 +1270,36 @@ class HyVideoContextOptions:
         }
 
         return (context_options,)
+
+class HyVideoTaylorSeerOptions:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "cache_device": (["main_device", "offload_device"], {"default": "offload_device"}),
+            "max_order": ("INT", {"default": 1, "min": 0, "max": 10, "step": 1, "tooltip": "Maximum order of the Taylor series expansion"}),
+            "fresh_threshold": ("INT", {"default": 5, "min": 0, "max": 100, "step": 1, "tooltip": "A higher fresh_threshold results in faster inference but may reduce generation quality."}),
+            }
+        }
+
+    RETURN_TYPES = ("TAYLORSEERARGS", )
+    RETURN_NAMES = ("taylorseer_args",)
+    FUNCTION = "passargs"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "https://github.com/Shenyi-Z/TaylorSeer"
+
+    def passargs(self, cache_device, max_order, fresh_threshold):
+        if cache_device == "main_device":
+            cache_device = mm.get_torch_device()
+        else:
+            cache_device = mm.unet_offload_device()
+        args = {
+            "cache_device": cache_device,
+            "compute_device": mm.get_torch_device(),
+            "max_order": max_order,
+            "fresh_threshold": fresh_threshold,
+        }
+        return (args,)
+    
 #region Sampler
 class HyVideoSampler:
     @classmethod
@@ -1298,6 +1332,7 @@ class HyVideoSampler:
                     }),
                 "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 4. Allows for new frames to be generated after 129 without looping"}),
                 "i2v_mode": (["stability", "dynamic"], {"default": "dynamic", "tooltip": "I2V mode for image2video process"}),
+                "taylorseer_args": ("TAYLORSEERARGS", ),
             }
         }
 
@@ -1308,7 +1343,7 @@ class HyVideoSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
                 samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
-                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability"):
+                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability", taylorseer_args=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1462,6 +1497,7 @@ class HyVideoSampler:
             image_cond_latents = image_cond_latents["samples"] * VAE_SCALING_FACTOR if image_cond_latents is not None else None,
             riflex_freq_index = riflex_freq_index,
             i2v_stability = i2v_stability,
+            taylorseer = taylorseer_args,
         )
 
         print_memory(device)
@@ -1879,6 +1915,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoI2VEncode": HyVideoI2VEncode,
     "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes,
     "HyVideoTextEmbedBridge": HyVideoTextEmbedBridge,
+    "HyVideoTaylorSeerOptions": HyVideoTaylorSeerOptions,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1906,4 +1943,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoI2VEncode": "HyVideo I2V Encode",
     "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes",
     "HyVideoTextEmbedBridge": "HyVideo TextEmbed Bridge",
+    "HyVideoTaylorSeerOptions": "HyVideo TaylorSeer Options",
     }
